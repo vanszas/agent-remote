@@ -6,6 +6,7 @@ import 'models.dart';
 class LocalStore {
   LocalStore({this._directory});
   final Directory? _directory;
+  Future<void> _writes = Future.value();
   Future<Directory> get directory async =>
       _directory ?? await getApplicationSupportDirectory();
   Future<File> get _file async =>
@@ -34,7 +35,12 @@ class LocalStore {
     }
   }
 
-  Future<void> save(List<AgentSession> sessions) async {
+  Future<void> save(List<AgentSession> sessions) {
+    final snapshot = List<AgentSession>.from(sessions);
+    return _writes = _writes.then((_) => _save(snapshot));
+  }
+
+  Future<void> _save(List<AgentSession> sessions) async {
     final f = await _file;
     await f.parent.create(recursive: true);
     final tmp = File('${f.path}.tmp'), bak = File('${f.path}.bak');

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "providers": [
+    {
+      "id": "local_gateway",
+      "mode": "localGateway",
+      "displayName": "Local gateway",
+      "description": "Run the agent gateway on this device. Mobile integration is deferred.",
+      "iconKey": "desktop",
+      "sortOrder": 10,
+      "enabled": true,
+      "integrationStatus": "deferred",
+      "supportsProfiles": false,
+      "supportsAuthentication": false,
+      "capabilities": ["sessions", "chat", "files", "images", "toolStreaming", "stop"],
+      "configurationFields": []
+    },
+    {
+      "id": "hermes_cloud",
+      "mode": "hermesCloud",
+      "displayName": "Hermes Cloud",
+      "description": "Use a managed Hermes service. Sign-in arrives in the final integration phase.",
+      "iconKey": "cloud",
+      "sortOrder": 20,
+      "enabled": true,
+      "integrationStatus": "deferred",
+      "supportsProfiles": false,
+      "supportsAuthentication": true,
+      "capabilities": ["sessions", "chat", "files", "images", "approvals", "clarification", "toolStreaming", "stop"],
+      "configurationFields": []
+    },
+    {
+      "id": "remote_gateway",
+      "mode": "remoteGateway",
+      "displayName": "Remote gateway",
+      "description": "Save remote gateway profile metadata now; connection remains deferred.",
+      "iconKey": "remote",
+      "sortOrder": 30,
+      "enabled": true,
+      "integrationStatus": "deferred",
+      "supportsProfiles": true,
+      "supportsAuthentication": false,
+      "capabilities": ["sessions", "chat", "files", "images", "approvals", "clarification", "toolStreaming", "stop", "workspaceAccess"],
+      "configurationFields": [
+        {
+          "id": "transportType",
+          "type": "select",
+          "label": "Transport",
+          "description": "Draft transport metadata only.",
+          "required": true,
+          "placeholder": "Choose transport",
+          "options": ["emulator", "usb", "tailscaleServe", "custom"],
+          "secret": false
+        },
+        {
+          "id": "endpoint",
+          "type": "text",
+          "label": "Endpoint draft",
+          "description": "Stored locally; never contacted in this phase.",
+          "required": false,
+          "placeholder": "Optional remote endpoint",
+          "options": [],
+          "secret": false
+        }
+      ]
+    }
+  ]
+}

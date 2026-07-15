@@ -13,14 +13,30 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final c = AppController(DemoAgentConnector(), LocalStore());
   await c.initialize();
-  final catalog = await ConnectionCatalog.loadAsset();
-  final profiles = await ConnectionProfileStore().load();
-  runApp(
-    HermesRemoteApp(
-      controller: c,
-      connections: ConnectionSettingsController(catalog, profiles),
-    ),
+  ConnectionCatalog catalog;
+  String? catalogError;
+  try {
+    catalog = await ConnectionCatalog.loadAsset();
+  } catch (_) {
+    catalog = const ConnectionCatalog(1, []);
+    catalogError = 'Connection catalog could not be loaded.';
+  }
+  final connectionStore = ConnectionProfileStore();
+  var connections = ConnectionSettingsController(
+    catalog,
+    connectionStore,
+    error: catalogError,
   );
+  try {
+    await connections.initialize();
+  } catch (_) {
+    connections = ConnectionSettingsController(
+      catalog,
+      connectionStore,
+      error: 'Connection settings could not be loaded.',
+    );
+  }
+  runApp(HermesRemoteApp(controller: c, connections: connections));
 }
 
 class HermesRemoteApp extends StatelessWidget {
@@ -355,15 +371,26 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> pick(String kind) async {
     try {
       String? path;
+      String? originalName;
+      String? sourceMime;
       if (kind == 'file') {
-        path = (await FilePicker.platform.pickFiles())?.files.single.path;
+        final picked = (await FilePicker.platform.pickFiles())?.files.single;
+        path = picked?.path;
+        originalName = picked?.name;
       } else {
-        path = (await ImagePicker().pickImage(
+        final picked = await ImagePicker().pickImage(
           source: kind == 'camera' ? ImageSource.camera : ImageSource.gallery,
-        ))?.path;
+        );
+        path = picked?.path;
+        originalName = picked?.name;
+        sourceMime = picked?.mimeType;
       }
       if (path == null) return;
-      final f = File(path), size = await f.length();
+      final sourcePath = path;
+      if (pending.length >= 10) {
+        throw ArgumentError('Maximum 10 attachments per message.');
+      }
+      final f = File(sourcePath), size = await f.length();
       final err = validateAttachmentSize(size);
       if (err != null) {
         if (mounted) {
@@ -375,16 +402,17 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final copy = await widget.c.store.importAttachment(
         sessionId: widget.c.current!.id,
-        sourcePath: path,
+        sourcePath: sourcePath,
         generatedId: DateTime.now().microsecondsSinceEpoch.toString(),
       );
       setState(
         () => pending.add(
           AgentAttachment(
             id: copy.path,
-            originalName: copy.uri.pathSegments.last,
+            originalName:
+                originalName ?? File(sourcePath).uri.pathSegments.last,
             localPath: copy.path,
-            mimeType: kind == 'file' ? 'application/octet-stream' : 'image/*',
+            mimeType: sourceMime ?? mimeForFilename(originalName ?? sourcePath),
             sizeBytes: size,
             kind: kind == 'file'
                 ? AttachmentKind.document
@@ -421,40 +449,44 @@ class MessageCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (m.content.startsWith('APPROVAL:')) ...[
-                  Text(m.content),
+                if (m.approvalRequest case final request?) ...[
+                  Text(request.title),
+                  Text(request.description),
+                  Text('Risk: ${request.riskLevel.name} • Demo only'),
                   Wrap(
                     children: [
                       FilledButton(
-                        onPressed: () => c.connector.respondToApproval(
-                          requestId: m.id,
-                          decision: ApprovalDecision.approve,
-                        ),
+                        onPressed: request.status == ApprovalStatus.pending
+                            ? () => c.approveRequest(request.id)
+                            : null,
                         child: const Text('Approve once'),
                       ),
                       TextButton(
-                        onPressed: () => c.connector.respondToApproval(
-                          requestId: m.id,
-                          decision: ApprovalDecision.deny,
-                        ),
+                        onPressed: request.status == ApprovalStatus.pending
+                            ? () => c.denyRequest(request.id)
+                            : null,
                         child: const Text('Deny'),
                       ),
                     ],
                   ),
-                ] else if (m.content.startsWith('CLARIFY:')) ...[
-                  Text(m.content),
+                  Text('Status: ${request.status.name}'),
+                ] else if (m.clarificationRequest case final request?) ...[
+                  Text(request.question),
                   Wrap(
-                    children: ['Fast', 'Detailed']
+                    children: request.choices
                         .map(
                           (x) => ActionChip(
                             label: Text(x),
-                            onPressed: () => c.connector.respondToClarification(
-                              requestId: m.id,
-                              answer: x,
-                            ),
+                            onPressed:
+                                request.status == ClarificationStatus.pending
+                                ? () => c.answerClarification(request.id, x)
+                                : null,
                           ),
                         )
                         .toList(),
+                  ),
+                  Text(
+                    request.selectedAnswer ?? 'Status: ${request.status.name}',
                   ),
                 ] else if (user)
                   SelectableText(m.content)
@@ -554,7 +586,7 @@ class TasksPage extends StatelessWidget {
             subtitle: Text(s.status.name),
             trailing: s.status == SessionStatus.generating
                 ? IconButton(
-                    onPressed: () => c.connector.stopGeneration(s.id),
+                    onPressed: () => c.stopSession(s.id),
                     icon: const Icon(Icons.stop),
                   )
                 : null,
@@ -652,35 +684,194 @@ class ConnectionSettingsScreen extends StatelessWidget {
       builder: (context, _) => ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text(
-            'Choose where the agent will run. Integration remains deferred.',
-          ),
-          const ListTile(
-            title: Text('Applies to'),
-            subtitle: Text('All profiles'),
-          ),
+          const Text('Choose where the agent will run.'),
+          if (controller.error != null) Text(controller.error!),
           ...controller.catalog.providers.map(
             (provider) => Card(
               child: ListTile(
                 enabled: provider.enabled,
                 selected: controller.selectedProviderId == provider.id,
                 leading: Icon(resolveConnectionIcon(provider.iconKey)),
-                title: Text(provider.displayName),
+                title: Text(
+                  provider.displayName,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 subtitle: Text(
                   '${provider.description}\n${provider.integrationStatus.name}',
                 ),
-                trailing: provider.supportsProfiles
-                    ? const Icon(Icons.list_alt)
+                trailing: controller.selectedProviderId == provider.id
+                    ? const Icon(Icons.check_circle_outline)
                     : null,
-                onTap: () => controller.select(provider.id),
+                onTap: () => controller.selectProvider(provider.id),
               ),
             ),
           ),
-          if (controller.selectedProviderId != null)
-            FilledButton.tonal(
-              onPressed: null,
-              child: const Text('Available in final integration phase'),
+          if (controller.selectedProvider case final provider?) ...[
+            if (provider.supportsProfiles) ...[
+              const Divider(),
+              const Text('Connection profiles'),
+              if (controller.profilesForProvider(provider.id).isEmpty)
+                const ListTile(title: Text('No connection profiles')),
+              ...controller
+                  .profilesForProvider(provider.id)
+                  .map(
+                    (profile) => ListTile(
+                      title: Text(profile.displayName),
+                      subtitle: Text(
+                        profile.isDefault
+                            ? 'Default'
+                            : profile.isEnabled
+                            ? 'Enabled'
+                            : 'Disabled',
+                      ),
+                      trailing: PopupMenuButton<String>(
+                        onSelected: (action) async {
+                          if (action == 'default') {
+                            await controller.setDefaultProfile(profile.id);
+                          }
+                          if (action == 'toggle') {
+                            await controller.toggleProfile(profile.id);
+                          }
+                          if (action == 'delete') {
+                            await controller.deleteProfile(profile.id);
+                          }
+                          if (action == 'edit' && context.mounted) {
+                            await profileDialog(
+                              context,
+                              controller,
+                              provider,
+                              profile,
+                            );
+                          }
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          PopupMenuItem(
+                            value: 'default',
+                            child: Text('Set default'),
+                          ),
+                          PopupMenuItem(
+                            value: 'toggle',
+                            child: Text('Enable / disable'),
+                          ),
+                          PopupMenuItem(value: 'delete', child: Text('Delete')),
+                        ],
+                      ),
+                    ),
+                  ),
+              FilledButton.icon(
+                onPressed: () =>
+                    profileDialog(context, controller, provider, null),
+                icon: const Icon(Icons.add),
+                label: const Text('Add profile'),
+              ),
+            ] else if (provider.supportsAuthentication)
+              const ListTile(
+                title: Text('Sign in unavailable'),
+                subtitle: Text('Available in final integration phase.'),
+              ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
+Future<void> profileDialog(
+  BuildContext context,
+  ConnectionSettingsController controller,
+  ConnectionProviderDefinition provider,
+  ConnectionProfile? profile,
+) async {
+  final name = TextEditingController(text: profile?.displayName);
+  final values = <String, Object?>{...?profile?.values};
+  final form = GlobalKey<FormState>();
+  await showDialog<void>(
+    context: context,
+    builder: (dialog) => StatefulBuilder(
+      builder: (_, setState) => AlertDialog(
+        title: Text(profile == null ? 'Add profile' : 'Edit profile'),
+        content: Form(
+          key: form,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Display name'),
+                  validator: (v) =>
+                      v?.trim().isEmpty ?? true ? 'Required' : null,
+                ),
+                ...provider.configurationFields.map((field) {
+                  if (field.secret) {
+                    return ListTile(
+                      title: Text(field.label),
+                      subtitle: const Text(
+                        'Available in final integration phase',
+                      ),
+                    );
+                  }
+                  if (field.type == 'select') {
+                    return DropdownButtonFormField<String>(
+                      initialValue: values[field.id] as String?,
+                      decoration: InputDecoration(labelText: field.label),
+                      items: field.options
+                          .map(
+                            (x) => DropdownMenuItem(value: x, child: Text(x)),
+                          )
+                          .toList(),
+                      onChanged: (v) => setState(() => values[field.id] = v),
+                      validator: (v) =>
+                          field.required && v == null ? 'Required' : null,
+                    );
+                  }
+                  if (field.type == 'toggle') {
+                    return SwitchListTile(
+                      title: Text(field.label),
+                      value: values[field.id] as bool? ?? false,
+                      onChanged: (v) => setState(() => values[field.id] = v),
+                    );
+                  }
+                  if (field.type == 'text') {
+                    return TextFormField(
+                      initialValue: values[field.id] as String?,
+                      decoration: InputDecoration(
+                        labelText: field.label,
+                        hintText: field.placeholder,
+                      ),
+                      onChanged: (v) => values[field.id] = v,
+                      validator: (v) => field.required && (v?.isEmpty ?? true)
+                          ? 'Required'
+                          : null,
+                    );
+                  }
+                  return ListTile(
+                    title: Text(field.label),
+                    subtitle: const Text('Unsupported field'),
+                  );
+                }),
+              ],
             ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!(form.currentState?.validate() ?? false)) return;
+              if (profile == null) {
+                await controller.addProfile(name.text, values);
+              } else {
+                await controller.updateProfile(profile.id, name.text, values);
+              }
+              if (dialog.mounted) Navigator.pop(dialog);
+            },
+            child: const Text('Save'),
+          ),
         ],
       ),
     ),

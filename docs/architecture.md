@@ -8,7 +8,12 @@ Flutter UI
   → HermesAgentConnector (deferred)
 ```
 
-Widgets depend on the generic connector contract, not Hermes endpoints or JSON-RPC.
+Widgets call `AppController` actions only. They do not access connector implementations, Hermes endpoints, or JSON-RPC.
+
+```text
+Typed connector event → AppController → ApprovalRequest/ClarificationRequest
+  → typed card → AppController action → AgentConnector
+```
 
 Connection settings use a separate local-only path:
 
@@ -16,7 +21,8 @@ Connection settings use a separate local-only path:
 assets/config/connection_providers.json
   → ConnectionCatalog
   → ConnectionSettingsController
-  → generic provider cards
+  → ConnectionSettingsSnapshot
+  → generic provider/profile UI
 
 application-support/connection_profiles.json
   → ConnectionProfileStore

@@ -14,12 +14,14 @@ class AppController extends ChangeNotifier {
   ThemeModeChoice theme = ThemeModeChoice.system;
   int page = 0;
   String search = '';
+  AgentCapabilities capabilities = const AgentCapabilities();
   AgentSession? get current =>
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
     sessions.addAll(await store.load());
     _sub = connector.events.listen(_event);
     await connector.initialize();
+    capabilities = await connector.getCapabilities();
     notifyListeners();
   }
 
@@ -152,30 +154,79 @@ class AppController extends ChangeNotifier {
         }
         break;
       case AgentEventType.approvalRequested:
-        messages.add(
-          ChatMessage(
+        final requestMessage = ChatMessage(
+          id: id,
+          sessionId: s.id,
+          role: MessageRole.system,
+          content: '',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          status: MessageStatus.queued,
+          approvalRequest: ApprovalRequest(
             id: id,
             sessionId: s.id,
-            role: MessageRole.system,
-            content: 'APPROVAL: ${e.text}\nDemo only — no command runs.',
+            correlationId: id,
+            title: 'Approval required',
+            description: e.text,
+            riskLevel: ApprovalRiskLevel.low,
             createdAt: DateTime.now(),
-            updatedAt: DateTime.now(),
-            status: MessageStatus.queued,
+            status: ApprovalStatus.pending,
+            isDemo: true,
           ),
         );
+        ai == null
+            ? messages.add(requestMessage)
+            : messages[messages.indexOf(ai)] = requestMessage;
         break;
       case AgentEventType.clarificationRequested:
-        messages.add(
-          ChatMessage(
+        final requestMessage = ChatMessage(
+          id: id,
+          sessionId: s.id,
+          role: MessageRole.system,
+          content: '',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+          status: MessageStatus.queued,
+          clarificationRequest: ClarificationRequest(
             id: id,
             sessionId: s.id,
-            role: MessageRole.system,
-            content: 'CLARIFY: ${e.text}\nFast | Detailed',
+            correlationId: id,
+            question: e.text,
+            choices: (e.data['choices'] as List? ?? [])
+                .whereType<String>()
+                .toList(),
+            allowFreeText: true,
             createdAt: DateTime.now(),
-            updatedAt: DateTime.now(),
-            status: MessageStatus.queued,
+            status: ClarificationStatus.pending,
+            isDemo: true,
           ),
         );
+        ai == null
+            ? messages.add(requestMessage)
+            : messages[messages.indexOf(ai)] = requestMessage;
+        break;
+      case AgentEventType.approvalResolved:
+        if (ai?.approvalRequest != null) {
+          messages[messages.indexOf(ai!)] = ai.copyWith(
+            approvalRequest: ai.approvalRequest!.copyWith(
+              status: e.text == ApprovalDecision.approve.name
+                  ? ApprovalStatus.approved
+                  : ApprovalStatus.denied,
+            ),
+            status: MessageStatus.complete,
+          );
+        }
+        break;
+      case AgentEventType.clarificationResolved:
+        if (ai?.clarificationRequest != null) {
+          messages[messages.indexOf(ai!)] = ai.copyWith(
+            clarificationRequest: ai.clarificationRequest!.copyWith(
+              status: ClarificationStatus.answered,
+              selectedAnswer: e.text,
+            ),
+            status: MessageStatus.complete,
+          );
+        }
         break;
       case AgentEventType.messageCompleted:
         if (ai != null) {
@@ -215,6 +266,9 @@ class AppController extends ChangeNotifier {
             ? SessionStatus.waitingApproval
             : e.type == AgentEventType.clarificationRequested
             ? SessionStatus.waitingClarification
+            : e.type == AgentEventType.approvalResolved ||
+                  e.type == AgentEventType.clarificationResolved
+            ? SessionStatus.idle
             : e.type == AgentEventType.generationStopped
             ? SessionStatus.stopped
             : s.status,
@@ -227,6 +281,17 @@ class AppController extends ChangeNotifier {
 
   Future<void> stop() =>
       currentId == null ? Future.value() : connector.stopGeneration(currentId!);
+  Future<void> stopSession(String id) => connector.stopGeneration(id);
+  Future<void> approveRequest(String id) => connector.respondToApproval(
+    requestId: id,
+    decision: ApprovalDecision.approve,
+  );
+  Future<void> denyRequest(String id) => connector.respondToApproval(
+    requestId: id,
+    decision: ApprovalDecision.deny,
+  );
+  Future<void> answerClarification(String id, String answer) =>
+      connector.respondToClarification(requestId: id, answer: answer);
   Future<void> pin(AgentSession s) async {
     _replace(s.copyWith(isPinned: !s.isPinned));
     await _save();

@@ -35,14 +35,13 @@ void main() {
       id: 'p1',
       providerId: 'remote',
       displayName: 'Office',
-      transportType: RemoteTransportType.custom,
-      endpoint: 'draft.example',
+      values: const {'transportType': 'custom', 'endpoint': 'draft.example'},
       createdAt: now,
       updatedAt: now,
     );
-    await store.save([profile]);
+    await store.save(ConnectionSettingsSnapshot(profiles: [profile]));
     final loaded = await store.load();
-    expect(loaded.single.displayName, 'Office');
+    expect(loaded.profiles.single.displayName, 'Office');
     expect(
       (await File(
         '${dir.path}${Platform.pathSeparator}connection_profiles.json',
@@ -51,10 +50,11 @@ void main() {
     );
   });
 
-  test('summary provider count is computed from catalog', () {
+  test('summary provider count is computed from catalog', () async {
+    final dir = await Directory.systemTemp.createTemp();
     final c = ConnectionSettingsController(
       ConnectionCatalog.parse(catalogJson),
-      const [],
+      ConnectionProfileStore(directory: dir),
     );
     expect(c.summary, 'No connection profile configured');
     expect(c.providerSummary, '2 providers available');

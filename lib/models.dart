@@ -15,14 +15,150 @@ enum AttachmentKind { image, document, archive, text, unknown }
 
 enum ToolActivityStatus { pending, running, success, failed, cancelled }
 
-enum ApprovalStatus { pending, approved, denied, expired }
+enum ApprovalStatus { pending, approved, denied, expired, cancelled }
+
+enum ApprovalRiskLevel { low, medium, high, critical, unknown }
 
 enum ApprovalDecision { approve, deny }
 
-enum ClarificationStatus { pending, answered, cancelled }
+enum ClarificationStatus { pending, answered, cancelled, expired }
 
 T _enum<T extends Enum>(List<T> values, Object? value, T fallback) =>
     values.where((e) => e.name == value).firstOrNull ?? fallback;
+
+class ApprovalRequest {
+  const ApprovalRequest({
+    required this.id,
+    required this.sessionId,
+    required this.correlationId,
+    required this.title,
+    required this.description,
+    required this.riskLevel,
+    this.commandPreview,
+    required this.createdAt,
+    this.expiresAt,
+    required this.status,
+    required this.isDemo,
+  });
+  final String id, sessionId, correlationId, title, description;
+  final ApprovalRiskLevel riskLevel;
+  final String? commandPreview;
+  final DateTime createdAt;
+  final DateTime? expiresAt;
+  final ApprovalStatus status;
+  final bool isDemo;
+  ApprovalRequest copyWith({ApprovalStatus? status}) => ApprovalRequest(
+    id: id,
+    sessionId: sessionId,
+    correlationId: correlationId,
+    title: title,
+    description: description,
+    riskLevel: riskLevel,
+    commandPreview: commandPreview,
+    createdAt: createdAt,
+    expiresAt: expiresAt,
+    status: status ?? this.status,
+    isDemo: isDemo,
+  );
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'sessionId': sessionId,
+    'correlationId': correlationId,
+    'title': title,
+    'description': description,
+    'riskLevel': riskLevel.name,
+    'commandPreview': commandPreview,
+    'createdAt': createdAt.toIso8601String(),
+    'expiresAt': expiresAt?.toIso8601String(),
+    'status': status.name,
+    'isDemo': isDemo,
+  };
+  factory ApprovalRequest.fromJson(Map<String, Object?> j) => ApprovalRequest(
+    id: j['id'] as String? ?? '',
+    sessionId: j['sessionId'] as String? ?? '',
+    correlationId: j['correlationId'] as String? ?? '',
+    title: j['title'] as String? ?? '',
+    description: j['description'] as String? ?? '',
+    riskLevel: _enum(
+      ApprovalRiskLevel.values,
+      j['riskLevel'],
+      ApprovalRiskLevel.unknown,
+    ),
+    commandPreview: j['commandPreview'] as String?,
+    createdAt:
+        DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+    expiresAt: DateTime.tryParse(j['expiresAt'] as String? ?? ''),
+    status: _enum(ApprovalStatus.values, j['status'], ApprovalStatus.pending),
+    isDemo: j['isDemo'] as bool? ?? false,
+  );
+}
+
+class ClarificationRequest {
+  const ClarificationRequest({
+    required this.id,
+    required this.sessionId,
+    required this.correlationId,
+    required this.question,
+    required this.choices,
+    required this.allowFreeText,
+    required this.createdAt,
+    required this.status,
+    this.selectedAnswer,
+    required this.isDemo,
+  });
+  final String id, sessionId, correlationId, question;
+  final List<String> choices;
+  final bool allowFreeText, isDemo;
+  final DateTime createdAt;
+  final ClarificationStatus status;
+  final String? selectedAnswer;
+  ClarificationRequest copyWith({
+    ClarificationStatus? status,
+    String? selectedAnswer,
+  }) => ClarificationRequest(
+    id: id,
+    sessionId: sessionId,
+    correlationId: correlationId,
+    question: question,
+    choices: choices,
+    allowFreeText: allowFreeText,
+    createdAt: createdAt,
+    status: status ?? this.status,
+    selectedAnswer: selectedAnswer ?? this.selectedAnswer,
+    isDemo: isDemo,
+  );
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'sessionId': sessionId,
+    'correlationId': correlationId,
+    'question': question,
+    'choices': choices,
+    'allowFreeText': allowFreeText,
+    'createdAt': createdAt.toIso8601String(),
+    'status': status.name,
+    'selectedAnswer': selectedAnswer,
+    'isDemo': isDemo,
+  };
+  factory ClarificationRequest.fromJson(Map<String, Object?> j) =>
+      ClarificationRequest(
+        id: j['id'] as String? ?? '',
+        sessionId: j['sessionId'] as String? ?? '',
+        correlationId: j['correlationId'] as String? ?? '',
+        question: j['question'] as String? ?? '',
+        choices: (j['choices'] as List? ?? []).whereType<String>().toList(),
+        allowFreeText: j['allowFreeText'] as bool? ?? false,
+        createdAt:
+            DateTime.tryParse(j['createdAt'] as String? ?? '') ??
+            DateTime.now(),
+        status: _enum(
+          ClarificationStatus.values,
+          j['status'],
+          ClarificationStatus.pending,
+        ),
+        selectedAnswer: j['selectedAnswer'] as String?,
+        isDemo: j['isDemo'] as bool? ?? false,
+      );
+}
 
 class AgentAttachment {
   const AgentAttachment({
@@ -125,6 +261,8 @@ class ChatMessage {
     this.attachments = const [],
     this.toolActivities = const [],
     this.errorMessage,
+    this.approvalRequest,
+    this.clarificationRequest,
   });
   final String id, sessionId, content;
   final MessageRole role;
@@ -133,11 +271,15 @@ class ChatMessage {
   final List<AgentAttachment> attachments;
   final List<ToolActivity> toolActivities;
   final String? errorMessage;
+  final ApprovalRequest? approvalRequest;
+  final ClarificationRequest? clarificationRequest;
   ChatMessage copyWith({
     String? content,
     MessageStatus? status,
     List<ToolActivity>? toolActivities,
     String? errorMessage,
+    ApprovalRequest? approvalRequest,
+    ClarificationRequest? clarificationRequest,
   }) => ChatMessage(
     id: id,
     sessionId: sessionId,
@@ -149,6 +291,8 @@ class ChatMessage {
     attachments: attachments,
     toolActivities: toolActivities ?? this.toolActivities,
     errorMessage: errorMessage ?? this.errorMessage,
+    approvalRequest: approvalRequest ?? this.approvalRequest,
+    clarificationRequest: clarificationRequest ?? this.clarificationRequest,
   );
   Map<String, Object?> toJson() => {
     'id': id,
@@ -161,6 +305,8 @@ class ChatMessage {
     'attachments': attachments.map((e) => e.toJson()).toList(),
     'toolActivities': toolActivities.map((e) => e.toJson()).toList(),
     'errorMessage': errorMessage,
+    'approvalRequest': approvalRequest?.toJson(),
+    'clarificationRequest': clarificationRequest?.toJson(),
   };
   factory ChatMessage.fromJson(Map<String, Object?> j) => ChatMessage(
     id: j['id'] as String? ?? '',
@@ -181,6 +327,16 @@ class ChatMessage {
         .map((e) => ToolActivity.fromJson(Map<String, Object?>.from(e)))
         .toList(),
     errorMessage: j['errorMessage'] as String?,
+    approvalRequest: j['approvalRequest'] is Map
+        ? ApprovalRequest.fromJson(
+            Map<String, Object?>.from(j['approvalRequest'] as Map),
+          )
+        : null,
+    clarificationRequest: j['clarificationRequest'] is Map
+        ? ClarificationRequest.fromJson(
+            Map<String, Object?>.from(j['clarificationRequest'] as Map),
+          )
+        : null,
   );
 }
 
@@ -273,4 +429,28 @@ String sanitizeFilename(String value) {
 
 String? validateAttachmentSize(int bytes) =>
     bytes > 15 * 1024 * 1024 ? 'File exceeds 15 MB limit.' : null;
+String mimeForFilename(String name) =>
+    switch (name.split('.').last.toLowerCase()) {
+      'png' => 'image/png',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'webp' => 'image/webp',
+      'gif' => 'image/gif',
+      'txt' || 'log' => 'text/plain',
+      'md' => 'text/markdown',
+      'json' => 'application/json',
+      'csv' => 'text/csv',
+      'pdf' => 'application/pdf',
+      'xml' => 'application/xml',
+      'yaml' || 'yml' => 'application/yaml',
+      'zip' => 'application/zip',
+      'dart' ||
+      'kt' ||
+      'java' ||
+      'cpp' ||
+      'h' ||
+      'py' ||
+      'js' ||
+      'ts' => 'text/plain',
+      _ => 'application/octet-stream',
+    };
 const appSchemaVersion = 1;

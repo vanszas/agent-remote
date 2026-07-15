@@ -98,12 +98,11 @@ class ConnectionProviderDefinition {
         supportsAuthentication: j['supportsAuthentication'] as bool? ?? false,
         capabilities: (j['capabilities'] as List? ?? [])
             .map(
-              (x) => _enum(
-                ConnectionCapability.values,
-                x,
-                ConnectionCapability.sessions,
-              ),
+              (x) => ConnectionCapability.values
+                  .where((e) => e.name == x)
+                  .firstOrNull,
             )
+            .whereType<ConnectionCapability>()
             .toSet()
             .toList(),
         configurationFields: (j['configurationFields'] as List? ?? [])
@@ -135,6 +134,15 @@ class ConnectionCatalog {
         if (p.id.isEmpty || !ids.add(p.id)) {
           throw const FormatException('Provider IDs must be unique.');
         }
+        final fields = <String>{};
+        for (final field in p.configurationFields) {
+          if (field.id.isEmpty || !fields.add(field.id)) {
+            throw const FormatException('Field IDs must be unique.');
+          }
+          if (field.type == 'select' && field.options.isEmpty) {
+            throw const FormatException('Select fields require options.');
+          }
+        }
       }
       return ConnectionCatalog(root['schemaVersion'] as int? ?? 1, providers);
     } catch (e) {
@@ -153,19 +161,17 @@ class ConnectionProfile {
     required this.id,
     required this.providerId,
     required this.displayName,
-    this.transportType,
-    this.endpoint,
+    this.values = const {},
     this.isDefault = false,
     this.isEnabled = true,
     required this.createdAt,
     required this.updatedAt,
     this.lastConnectedAt,
     this.metadata = const {},
-    this.schemaVersion = 1,
+    this.schemaVersion = 2,
   });
   final String id, providerId, displayName;
-  final RemoteTransportType? transportType;
-  final String? endpoint;
+  final Map<String, Object?> values;
   final bool isDefault, isEnabled;
   final DateTime createdAt, updatedAt;
   final DateTime? lastConnectedAt;
@@ -176,8 +182,7 @@ class ConnectionProfile {
     'id': id,
     'providerId': providerId,
     'displayName': displayName,
-    'transportType': transportType?.name,
-    'endpoint': endpoint,
+    'values': values,
     'isDefault': isDefault,
     'isEnabled': isEnabled,
     'createdAt': createdAt.toIso8601String(),
@@ -191,14 +196,12 @@ class ConnectionProfile {
     id: j['id'] as String? ?? '',
     providerId: j['providerId'] as String? ?? '',
     displayName: j['displayName'] as String? ?? '',
-    transportType: j['transportType'] == null
-        ? null
-        : _enum(
-            RemoteTransportType.values,
-            j['transportType'],
-            RemoteTransportType.unknown,
-          ),
-    endpoint: j['endpoint'] as String?,
+    values: j['values'] is Map
+        ? Map<String, Object?>.from(j['values'] as Map)
+        : {
+            if (j['transportType'] != null) 'transportType': j['transportType'],
+            if (j['endpoint'] != null) 'endpoint': j['endpoint'],
+          },
     isDefault: j['isDefault'] as bool? ?? false,
     isEnabled: j['isEnabled'] as bool? ?? true,
     createdAt:
@@ -207,43 +210,78 @@ class ConnectionProfile {
         DateTime.tryParse(j['updatedAt'] as String? ?? '') ?? DateTime.now(),
     lastConnectedAt: DateTime.tryParse(j['lastConnectedAt'] as String? ?? ''),
     metadata: Map<String, Object?>.from(j['metadata'] as Map? ?? {}),
-    schemaVersion: j['schemaVersion'] as int? ?? 1,
+    schemaVersion: 2,
   );
+}
+
+class ConnectionSettingsSnapshot {
+  const ConnectionSettingsSnapshot({
+    this.selectedProviderId,
+    this.profiles = const [],
+  });
+  final String? selectedProviderId;
+  final List<ConnectionProfile> profiles;
+  Map<String, Object?> toJson() => {
+    'schemaVersion': 2,
+    'selectedProviderId': selectedProviderId,
+    'profiles': profiles.map((e) => e.toJson()).toList(),
+  };
+  factory ConnectionSettingsSnapshot.fromJson(Map<String, Object?> j) =>
+      ConnectionSettingsSnapshot(
+        selectedProviderId: j['selectedProviderId'] as String?,
+        profiles: (j['profiles'] as List? ?? [])
+            .whereType<Map>()
+            .map(
+              (e) => ConnectionProfile.fromJson(Map<String, Object?>.from(e)),
+            )
+            .toList(),
+      );
 }
 
 class ConnectionProfileStore {
   ConnectionProfileStore({this._directory});
   final Directory? _directory;
+  Future<void> _writes = Future.value();
   Future<File> get _file async {
     final d = _directory ?? await getApplicationSupportDirectory();
     return File('${d.path}${Platform.pathSeparator}connection_profiles.json');
   }
 
-  Future<List<ConnectionProfile>> load() async {
+  Future<ConnectionSettingsSnapshot> load() async {
+    final f = await _file;
+    if (!await f.exists()) return const ConnectionSettingsSnapshot();
     try {
-      final f = await _file;
-      if (!await f.exists()) return [];
-      final j = jsonDecode(await f.readAsString()) as Map;
-      return (j['profiles'] as List? ?? [])
-          .whereType<Map>()
-          .map((x) => ConnectionProfile.fromJson(Map<String, Object?>.from(x)))
-          .toList();
-    } catch (_) {
-      return [];
+      return _decode(await f.readAsString());
+    } on FormatException {
+      final backup = File('${f.path}.bak');
+      if (!await backup.exists()) rethrow;
+      return _decode(await backup.readAsString());
     }
   }
 
-  Future<void> save(List<ConnectionProfile> profiles) async {
+  ConnectionSettingsSnapshot _decode(String source) {
+    try {
+      return ConnectionSettingsSnapshot.fromJson(
+        Map<String, Object?>.from(jsonDecode(source) as Map),
+      );
+    } catch (_) {
+      throw const FormatException('Connection settings are invalid.');
+    }
+  }
+
+  Future<void> save(ConnectionSettingsSnapshot snapshot) {
+    final copy = ConnectionSettingsSnapshot(
+      selectedProviderId: snapshot.selectedProviderId,
+      profiles: List.unmodifiable(snapshot.profiles),
+    );
+    return _writes = _writes.then((_) => _save(copy));
+  }
+
+  Future<void> _save(ConnectionSettingsSnapshot snapshot) async {
     final f = await _file;
     await f.parent.create(recursive: true);
     final t = File('${f.path}.tmp');
-    await t.writeAsString(
-      jsonEncode({
-        'schemaVersion': 1,
-        'profiles': profiles.map((x) => x.toJson()).toList(),
-      }),
-      flush: true,
-    );
+    await t.writeAsString(jsonEncode(snapshot.toJson()), flush: true);
     final backup = File('${f.path}.bak');
     if (await f.exists()) await f.copy(backup.path);
     try {
@@ -257,16 +295,152 @@ class ConnectionProfileStore {
 }
 
 class ConnectionSettingsController extends ChangeNotifier {
-  ConnectionSettingsController(this.catalog, this.profiles);
+  ConnectionSettingsController(this.catalog, this.store, {this.error});
   final ConnectionCatalog catalog;
-  final List<ConnectionProfile> profiles;
+  final ConnectionProfileStore store;
+  final String? error;
+  final List<ConnectionProfile> profiles = [];
   String? selectedProviderId;
+  ConnectionProviderDefinition? get selectedProvider =>
+      catalog.providers.where((p) => p.id == selectedProviderId).firstOrNull;
   String get summary => profiles.where((x) => x.isEnabled).isEmpty
       ? 'No connection profile configured'
       : '${profiles.where((x) => x.isEnabled).length} connection profile';
   String get providerSummary =>
       '${catalog.providers.where((x) => x.enabled).length} providers available';
-  void select(String id) {
+  Future<void> initialize() async {
+    final snapshot = await store.load();
+    profiles
+      ..clear()
+      ..addAll(snapshot.profiles);
+    selectedProviderId = snapshot.selectedProviderId;
+    selectedProviderId ??=
+        catalog.providers
+            .where((p) => p.enabled && p.supportsProfiles)
+            .firstOrNull
+            ?.id ??
+        catalog.providers.where((p) => p.enabled).firstOrNull?.id;
+    notifyListeners();
+  }
+
+  Future<void> reload() => initialize();
+  Future<void> save() => store.save(
+    ConnectionSettingsSnapshot(
+      selectedProviderId: selectedProviderId,
+      profiles: profiles,
+    ),
+  );
+  Future<void> selectProvider(String id) async {
+    selectedProviderId = id;
+    await save();
+    notifyListeners();
+  }
+
+  void select(String id) => selectProvider(id);
+  List<ConnectionProfile> profilesForProvider(String id) =>
+      profiles.where((p) => p.providerId == id).toList();
+  ConnectionProfile? get defaultProfile =>
+      profiles.where((p) => p.isDefault && p.isEnabled).firstOrNull;
+  Future<void> addProfile(String name, Map<String, Object?> values) async {
+    _validate(name, values);
+    final now = DateTime.now();
+    profiles.add(
+      ConnectionProfile(
+        id: 'p${now.microsecondsSinceEpoch}',
+        providerId: selectedProviderId ?? '',
+        displayName: name.trim(),
+        values: values,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    await save();
+    notifyListeners();
+  }
+
+  Future<void> updateProfile(
+    String id,
+    String name,
+    Map<String, Object?> values,
+  ) async {
+    _validate(name, values);
+    final i = profiles.indexWhere((p) => p.id == id);
+    if (i < 0) throw StateError('Profile not found');
+    final old = profiles[i];
+    profiles[i] = ConnectionProfile(
+      id: old.id,
+      providerId: old.providerId,
+      displayName: name.trim(),
+      values: values,
+      isDefault: old.isDefault,
+      isEnabled: old.isEnabled,
+      createdAt: old.createdAt,
+      updatedAt: DateTime.now(),
+      metadata: old.metadata,
+    );
+    await save();
+    notifyListeners();
+  }
+
+  Future<void> deleteProfile(String id) async {
+    profiles.removeWhere((p) => p.id == id);
+    await save();
+    notifyListeners();
+  }
+
+  Future<void> setDefaultProfile(String id) async {
+    for (var i = 0; i < profiles.length; i++) {
+      final p = profiles[i];
+      profiles[i] = ConnectionProfile(
+        id: p.id,
+        providerId: p.providerId,
+        displayName: p.displayName,
+        values: p.values,
+        isDefault: p.id == id,
+        isEnabled: p.id == id ? true : p.isEnabled,
+        createdAt: p.createdAt,
+        updatedAt: DateTime.now(),
+        metadata: p.metadata,
+      );
+    }
+    await save();
+    notifyListeners();
+  }
+
+  Future<void> toggleProfile(String id) async {
+    final i = profiles.indexWhere((p) => p.id == id);
+    final p = profiles[i];
+    profiles[i] = ConnectionProfile(
+      id: p.id,
+      providerId: p.providerId,
+      displayName: p.displayName,
+      values: p.values,
+      isDefault: false,
+      isEnabled: !p.isEnabled,
+      createdAt: p.createdAt,
+      updatedAt: DateTime.now(),
+      metadata: p.metadata,
+    );
+    await save();
+    notifyListeners();
+  }
+
+  void _validate(String name, Map<String, Object?> values) {
+    if (name.trim().isEmpty) throw ArgumentError('Display name is required');
+    final provider = catalog.providers
+        .where((p) => p.id == selectedProviderId)
+        .firstOrNull;
+    for (final f in provider?.configurationFields ?? const []) {
+      if (f.secret && values.containsKey(f.id)) {
+        throw ArgumentError('Secret fields are deferred');
+      }
+      if (f.required && (values[f.id] == null || values[f.id] == '')) {
+        throw ArgumentError('${f.label} is required');
+      }
+    }
+  }
+
+  void legacySelect(String id) {
     selectedProviderId = id;
     notifyListeners();
   }

@@ -8,11 +8,11 @@ Flutter Android app-first prototype for Hermes Agent. Current mode is fully loca
 
 - Local session history, search, pin, rename, delete
 - Deterministic streamed demo responses
-- Simulated tools, approvals, clarification, stop, and failure
+- Simulated tools, typed approvals/clarification, stop, and failure
 - Local image/file attachment metadata
 - Material 3 phone/tablet navigation
 - System/light/dark themes
-- Data-driven connection catalog: Local gateway, Hermes Cloud, Remote gateway
+- Data-driven connection catalog and local profile CRUD
 - Versioned JSON persistence with atomic replacement
 
 ## Architecture
@@ -44,7 +44,7 @@ flutter build apk --debug
 
 ## Limitations
 
-No Hermes backend, login, REST, WebSocket, Tailscale, USB bridge, or Hermes Cloud integration. Connection profiles are metadata only. Runtime attachment/camera and full persistence matrix remain partially verified; see [`docs/verification/phase2.md`](docs/verification/phase2.md).
+No Hermes backend, login, REST, WebSocket, Tailscale, USB bridge, or Hermes Cloud integration. Connection profiles are metadata only. Debug APK is development-only; release signing is not configured. Runtime attachment/camera and full persistence matrix remain partially verified; see [`docs/verification/phase2.md`](docs/verification/phase2.md).
 
 ## Roadmap
 

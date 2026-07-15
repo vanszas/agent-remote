@@ -97,6 +97,8 @@ class DemoAgentConnector implements AgentConnector {
   final _events = StreamController<AgentEvent>.broadcast();
   final _sessions = <String, AgentSession>{};
   final _cancelled = <String>{};
+  final _pendingApprovals = <String, String>{};
+  final _pendingClarifications = <String, String>{};
   bool _closed = false;
   int _id = 0;
   @override
@@ -163,6 +165,7 @@ class DemoAgentConnector implements AgentConnector {
       return;
     }
     if (text == '/demo approval') {
+      _pendingApprovals[correlation] = sessionId;
       _emit(
         AgentEvent(
           AgentEventType.approvalRequested,
@@ -174,6 +177,7 @@ class DemoAgentConnector implements AgentConnector {
       return;
     }
     if (text == '/demo clarify') {
+      _pendingClarifications[correlation] = sessionId;
       _emit(
         AgentEvent(
           AgentEventType.clarificationRequested,
@@ -249,26 +253,53 @@ class DemoAgentConnector implements AgentConnector {
   Future<void> respondToApproval({
     required String requestId,
     required ApprovalDecision decision,
-  }) async => _emit(
-    AgentEvent(
-      AgentEventType.approvalResolved,
-      sessionId: '',
-      correlationId: requestId,
-      text: decision.name,
-    ),
-  );
+  }) async {
+    final sessionId = _pendingApprovals.remove(requestId);
+    if (sessionId == null) throw StateError('Approval request is not pending');
+    _emit(
+      AgentEvent(
+        AgentEventType.approvalResolved,
+        sessionId: sessionId,
+        correlationId: requestId,
+        text: decision.name,
+      ),
+    );
+    _emit(
+      AgentEvent(
+        AgentEventType.messageCompleted,
+        sessionId: sessionId,
+        correlationId: requestId,
+      ),
+    );
+  }
+
   @override
   Future<void> respondToClarification({
     required String requestId,
     required String answer,
-  }) async => _emit(
-    AgentEvent(
-      AgentEventType.clarificationResolved,
-      sessionId: '',
-      correlationId: requestId,
-      text: answer,
-    ),
-  );
+  }) async {
+    final sessionId = _pendingClarifications.remove(requestId);
+    if (sessionId == null) {
+      throw StateError('Clarification request is not pending');
+    }
+    if (answer.trim().isEmpty) throw ArgumentError('Answer is required');
+    _emit(
+      AgentEvent(
+        AgentEventType.clarificationResolved,
+        sessionId: sessionId,
+        correlationId: requestId,
+        text: answer,
+      ),
+    );
+    _emit(
+      AgentEvent(
+        AgentEventType.messageCompleted,
+        sessionId: sessionId,
+        correlationId: requestId,
+      ),
+    );
+  }
+
   @override
   Future<void> renameSession(String id, String title) async {
     final s = _sessions[id];
@@ -278,12 +309,17 @@ class DemoAgentConnector implements AgentConnector {
   @override
   Future<void> deleteSession(String id) async {
     _sessions.remove(id);
+    _pendingApprovals.removeWhere((_, sessionId) => sessionId == id);
+    _pendingClarifications.removeWhere((_, sessionId) => sessionId == id);
+    _cancelled.add(id);
   }
 
   @override
   Future<void> dispose() async {
     _closed = true;
     _cancelled.addAll(_sessions.keys);
+    _pendingApprovals.clear();
+    _pendingClarifications.clear();
     await _events.close();
   }
 }

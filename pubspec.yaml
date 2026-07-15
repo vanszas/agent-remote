@@ -1,5 +1,5 @@
 name: hermes_remote
-description: "A new Flutter project."
+description: "App-first Flutter Android client for Hermes Agent."
 publish_to: 'none'
 version: 0.2.0+1
 

@@ -296,26 +296,17 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final text = TextEditingController();
-  final scroll = ScrollController();
   final pending = <AgentAttachment>[];
-  bool didInitialScroll = false;
 
   @override
   void dispose() {
     text.dispose();
-    scroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final c = widget.c, s = c.current!;
-    if (!c.loadingSession && !didInitialScroll) {
-      didInitialScroll = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (scroll.hasClients) scroll.jumpTo(scroll.position.maxScrollExtent);
-      });
-    }
     return Scaffold(
       appBar: AppBar(
         leading: BackButton(
@@ -342,10 +333,11 @@ class _ChatScreenState extends State<ChatScreen> {
               child: c.loadingSession
                   ? const Center(child: CircularProgressIndicator())
                   : ListView.builder(
-                      controller: scroll,
+                      reverse: true,
                       padding: const EdgeInsets.all(12),
                       itemCount: s.messages.length,
-                      itemBuilder: (_, i) => MessageCard(s.messages[i], c),
+                      itemBuilder: (_, i) =>
+                          MessageCard(s.messages[s.messages.length - 1 - i], c),
                     ),
             ),
             if (pending.isNotEmpty)

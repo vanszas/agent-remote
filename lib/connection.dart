@@ -282,7 +282,7 @@ class ConnectionProfileStore {
   Future<void> _save(ConnectionSettingsSnapshot snapshot) async {
     final f = await _file;
     await f.parent.create(recursive: true);
-    final t = File('${f.path}.tmp');
+    final t = File('${f.path}.${DateTime.now().microsecondsSinceEpoch}.tmp');
     await t.writeAsString(jsonEncode(snapshot.toJson()), flush: true);
     final backup = File('${f.path}.bak');
     if (await f.exists()) await f.copy(backup.path);

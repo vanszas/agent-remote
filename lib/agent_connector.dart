@@ -1,6 +1,26 @@
 import 'dart:async';
 import 'models.dart';
 
+class AgentWorkspace {
+  const AgentWorkspace({
+    required this.id,
+    required this.name,
+    required this.path,
+    this.isActive = false,
+  });
+  final String id, name, path;
+  final bool isActive;
+}
+
+class AgentTask {
+  const AgentTask({
+    required this.id,
+    required this.title,
+    required this.status,
+  });
+  final String id, title, status;
+}
+
 enum AgentEventType {
   connectorReady,
   sessionCreated,
@@ -66,11 +86,14 @@ abstract class AgentConnector {
   Stream<AgentEvent> get events;
   Future<void> initialize();
   Future<AgentCapabilities> getCapabilities();
-  Future<List<AgentSession>> listSessions();
+  Future<List<AgentSession>> listSessions({int limit = 200});
   Future<AgentSession> createSession({
     String? workspaceName,
     String? modelName,
   });
+  Future<List<AgentWorkspace>> listWorkspaces();
+  Future<List<AgentTask>> listTasks();
+  void selectWorkspace(String path);
   Future<AgentSession> loadSession(String id);
   Future<void> sendPrompt({
     required String sessionId,
@@ -112,10 +135,12 @@ class DemoAgentConnector implements AgentConnector {
   Future<void> initialize() async =>
       _emit(const AgentEvent(AgentEventType.connectorReady, sessionId: ''));
   @override
+  @override
   Future<AgentCapabilities> getCapabilities() async =>
       const AgentCapabilities();
   @override
-  Future<List<AgentSession>> listSessions() async => _sessions.values.toList();
+  Future<List<AgentSession>> listSessions({int limit = 200}) async =>
+      _sessions.values.toList();
   @override
   Future<AgentSession> createSession({
     String? workspaceName,
@@ -134,6 +159,13 @@ class DemoAgentConnector implements AgentConnector {
     _emit(AgentEvent(AgentEventType.sessionCreated, sessionId: s.id));
     return s;
   }
+
+  @override
+  Future<List<AgentWorkspace>> listWorkspaces() async => const [];
+  @override
+  Future<List<AgentTask>> listTasks() async => const [];
+  @override
+  void selectWorkspace(String path) {}
 
   @override
   Future<AgentSession> loadSession(String id) async =>

@@ -13,6 +13,7 @@ dependencies:
   flutter_markdown_plus: ^1.0.12
   image_picker: ^1.2.3
   path_provider: ^2.1.6
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:

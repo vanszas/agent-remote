@@ -8,6 +8,8 @@ import 'app_controller.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'connection.dart';
+import 'credential_store.dart';
+import 'hermes_gateway_connector.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,6 +37,29 @@ void main() async {
       connectionStore,
       error: 'Connection settings could not be loaded.',
     );
+  }
+  final profile = connections.defaultProfile;
+  final endpoint = profile?.values['endpoint'] as String?;
+  final credentials = profile == null
+      ? null
+      : await CredentialStore().load(profile.id);
+  if (profile != null &&
+      endpoint != null &&
+      endpoint.isNotEmpty &&
+      credentials != null) {
+    await c.connect(
+      HermesGatewayConnector(
+        HermesGatewayConfig(
+          baseUrl: Uri.parse(endpoint),
+          provider: 'basic',
+          username: credentials.username,
+          password: credentials.password,
+        ),
+      ),
+    );
+    if (!c.isDemo) {
+      await c.loadWorkspaces(profile.values['workspacePath'] as String?);
+    }
   }
   runApp(HermesRemoteApp(controller: c, connections: connections));
 }
@@ -87,7 +112,7 @@ class AppShell extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Hermes Remote'),
         actions: [
-          const Chip(label: Text('Demo Mode')),
+          Chip(label: Text(c.connectorLabel)),
           IconButton(
             tooltip: 'New chat',
             onPressed: c.newSession,
@@ -149,7 +174,22 @@ class ChatsPage extends StatelessWidget {
           'Connect to your ideas',
           style: Theme.of(context).textTheme.headlineSmall,
         ),
-        const Text('Full local demo. No backend connection.'),
+        Text(
+          c.isDemo
+              ? 'Full local demo. No backend connection.'
+              : 'Connected to Hermes gateway.',
+        ),
+        if (!c.isDemo && c.workspaces.isNotEmpty)
+          DropdownButtonFormField<String>(
+            initialValue: c.workspacePath,
+            decoration: const InputDecoration(labelText: 'Workspace PC'),
+            items: c.workspaces
+                .map(
+                  (w) => DropdownMenuItem(value: w.path, child: Text(w.name)),
+                )
+                .toList(),
+            onChanged: (path) => path == null ? null : c.selectWorkspace(path),
+          ),
         const SizedBox(height: 12),
         SearchBar(
           hintText: 'Search sessions',
@@ -161,34 +201,44 @@ class ChatsPage extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         Expanded(
-          child: c.filtered.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+          child: RefreshIndicator(
+            onRefresh: c.reloadSessions,
+            child: c.filtered.isEmpty
+                ? ListView(
                     children: [
+                      const SizedBox(height: 120),
                       const Icon(Icons.forum_outlined, size: 64),
-                      const Text('No chats yet'),
-                      FilledButton.icon(
-                        onPressed: c.newSession,
-                        icon: const Icon(Icons.add),
-                        label: const Text('New Chat'),
-                      ),
-                      const Text(
-                        'Try /demo tool, approval, clarify, error, or long',
+                      const Center(child: Text('No chats yet')),
+                      Center(
+                        child: FilledButton.icon(
+                          onPressed: c.newSession,
+                          icon: const Icon(Icons.add),
+                          label: const Text('New Chat'),
+                        ),
                       ),
                     ],
+                  )
+                : ListView(
+                    children: [
+                      ...c.filtered
+                          .where((s) => s.isPinned)
+                          .map((s) => SessionTile(c, s)),
+                      ...c.filtered
+                          .where((s) => !s.isPinned)
+                          .map((s) => SessionTile(c, s)),
+                      if (c.filtered.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          child: Center(
+                            child: OutlinedButton(
+                              onPressed: c.loadMore,
+                              child: const Text('Load More History'),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-                )
-              : ListView(
-                  children: [
-                    ...c.filtered
-                        .where((s) => s.isPinned)
-                        .map((s) => SessionTile(c, s)),
-                    ...c.filtered
-                        .where((s) => !s.isPinned)
-                        .map((s) => SessionTile(c, s)),
-                  ],
-                ),
+          ),
         ),
       ],
     ),
@@ -206,7 +256,8 @@ class SessionTile extends StatelessWidget {
       leading: Icon(s.isPinned ? Icons.push_pin : Icons.chat_outlined),
       title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
-        s.messages.lastOrNull?.content ?? 'Empty session',
+        s.messages.lastOrNull?.content ??
+            (s.preview.isNotEmpty ? s.preview : 'Empty session'),
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
@@ -245,10 +296,26 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final text = TextEditingController();
+  final scroll = ScrollController();
   final pending = <AgentAttachment>[];
+  bool didInitialScroll = false;
+
+  @override
+  void dispose() {
+    text.dispose();
+    scroll.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = widget.c, s = c.current!;
+    if (!c.loadingSession && !didInitialScroll) {
+      didInitialScroll = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (scroll.hasClients) scroll.jumpTo(scroll.position.maxScrollExtent);
+      });
+    }
     return Scaffold(
       appBar: AppBar(
         leading: BackButton(
@@ -261,9 +328,9 @@ class _ChatScreenState extends State<ChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(s.title),
-            const Text(
-              'Demo Mode • local only',
-              style: TextStyle(fontSize: 12),
+            Text(
+              c.isDemo ? 'Demo Mode • local only' : 'Hermes gateway',
+              style: const TextStyle(fontSize: 12),
             ),
           ],
         ),
@@ -272,11 +339,14 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           children: [
             Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.all(12),
-                itemCount: s.messages.length,
-                itemBuilder: (_, i) => MessageCard(s.messages[i], c),
-              ),
+              child: c.loadingSession
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView.builder(
+                      controller: scroll,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: s.messages.length,
+                      itemBuilder: (_, i) => MessageCard(s.messages[i], c),
+                    ),
             ),
             if (pending.isNotEmpty)
               SizedBox(
@@ -297,48 +367,62 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             Wrap(
               spacing: 8,
-              children:
-                  [
-                        '/demo tool',
-                        '/demo approval',
-                        '/demo clarify',
-                        '/demo error',
-                        '/demo long',
-                      ]
-                      .map(
-                        (x) => ActionChip(
-                          label: Text(x.replaceFirst('/demo ', '')),
-                          onPressed: () => text.text = x,
-                        ),
-                      )
-                      .toList(),
+              children: c.isDemo
+                  ? [
+                          '/demo tool',
+                          '/demo approval',
+                          '/demo clarify',
+                          '/demo error',
+                          '/demo long',
+                        ]
+                        .map(
+                          (x) => ActionChip(
+                            label: Text(x.replaceFirst('/demo ', '')),
+                            onPressed: () => text.text = x,
+                          ),
+                        )
+                        .toList()
+                  : [],
             ),
             Padding(
               padding: const EdgeInsets.all(8),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  PopupMenuButton<String>(
-                    tooltip: 'Add attachment',
-                    icon: const Icon(Icons.attach_file),
-                    onSelected: pick,
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(
-                        value: 'image',
-                        child: Text('Gallery image'),
-                      ),
-                      PopupMenuItem(value: 'camera', child: Text('Camera')),
-                      PopupMenuItem(value: 'file', child: Text('File')),
-                    ],
-                  ),
+                  if (c.capabilities.supportsImages ||
+                      c.capabilities.supportsFiles)
+                    PopupMenuButton<String>(
+                      tooltip: 'Add attachment',
+                      icon: const Icon(Icons.attach_file),
+                      onSelected: pick,
+                      itemBuilder: (_) => [
+                        if (c.capabilities.supportsImages)
+                          const PopupMenuItem(
+                            value: 'image',
+                            child: Text('Gallery image'),
+                          ),
+                        if (c.capabilities.supportsImages)
+                          const PopupMenuItem(
+                            value: 'camera',
+                            child: Text('Camera'),
+                          ),
+                        if (c.capabilities.supportsFiles)
+                          const PopupMenuItem(
+                            value: 'file',
+                            child: Text('File'),
+                          ),
+                      ],
+                    ),
                   Expanded(
                     child: TextField(
                       controller: text,
                       maxLines: 5,
                       minLines: 1,
-                      decoration: const InputDecoration(
-                        hintText: 'Message Demo Agent',
-                        border: OutlineInputBorder(),
+                      decoration: InputDecoration(
+                        hintText: c.isDemo
+                            ? 'Message Demo Agent'
+                            : 'Message Hermes',
+                        border: const OutlineInputBorder(),
                       ),
                     ),
                   ),
@@ -562,37 +646,43 @@ class AttachmentChip extends StatelessWidget {
   );
 }
 
-class TasksPage extends StatelessWidget {
+class TasksPage extends StatefulWidget {
   const TasksPage(this.c, {super.key});
   final AppController c;
   @override
+  State<TasksPage> createState() => _TasksPageState();
+}
+
+class _TasksPageState extends State<TasksPage> {
+  @override
+  void initState() {
+    super.initState();
+    widget.c.reloadTasks();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final active = c.sessions
-        .where((s) => s.status != SessionStatus.idle)
-        .toList();
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text('Tasks', style: Theme.of(context).textTheme.headlineSmall),
-        if (active.isEmpty)
-          const ListTile(
-            leading: Icon(Icons.task_alt),
-            title: Text('No active tasks'),
+    final c = widget.c;
+    return RefreshIndicator(
+      onRefresh: c.reloadTasks,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Tasks', style: Theme.of(context).textTheme.headlineSmall),
+          if (c.tasks.isEmpty)
+            const ListTile(
+              leading: Icon(Icons.task_alt),
+              title: Text('No active tasks'),
+            ),
+          ...c.tasks.map(
+            (task) => ListTile(
+              leading: const CircularProgressIndicator(),
+              title: Text(task.title),
+              subtitle: Text(task.status),
+            ),
           ),
-        ...active.map(
-          (s) => ListTile(
-            onTap: () => c.open(s),
-            title: Text(s.title),
-            subtitle: Text(s.status.name),
-            trailing: s.status == SessionStatus.generating
-                ? IconButton(
-                    onPressed: () => c.stopSession(s.id),
-                    icon: const Icon(Icons.stop),
-                  )
-                : null,
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -658,7 +748,7 @@ class SettingsPage extends StatelessWidget {
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => ConnectionSettingsScreen(connections),
+              builder: (_) => ConnectionSettingsScreen(connections, c),
             ),
           ),
         ),
@@ -674,8 +764,9 @@ class SettingsPage extends StatelessWidget {
 }
 
 class ConnectionSettingsScreen extends StatelessWidget {
-  const ConnectionSettingsScreen(this.controller, {super.key});
+  const ConnectionSettingsScreen(this.controller, this.app, {super.key});
   final ConnectionSettingsController controller;
+  final AppController app;
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Gateway Connection')),
@@ -759,6 +850,18 @@ class ConnectionSettingsScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+              if (provider.id == 'remote_gateway')
+                FilledButton.icon(
+                  onPressed: () => connectGateway(
+                    context,
+                    app,
+                    controller,
+                    controller.defaultProfile ??
+                        controller.profilesForProvider(provider.id).firstOrNull,
+                  ),
+                  icon: const Icon(Icons.link),
+                  label: const Text('Connect'),
+                ),
               FilledButton.icon(
                 onPressed: () =>
                     profileDialog(context, controller, provider, null),
@@ -773,6 +876,101 @@ class ConnectionSettingsScreen extends StatelessWidget {
           ],
         ],
       ),
+    ),
+  );
+}
+
+Future<void> connectGateway(
+  BuildContext context,
+  AppController app,
+  ConnectionSettingsController settings,
+  ConnectionProfile? profile,
+) async {
+  if (profile == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Add a gateway profile first.')),
+    );
+    return;
+  }
+  final endpoint = profile.values['endpoint'] as String? ?? '';
+  final saved = await CredentialStore().load(profile.id);
+  if (!context.mounted) return;
+  final username = TextEditingController(text: saved?.username);
+  final password = TextEditingController(text: saved?.password);
+  final form = GlobalKey<FormState>();
+  await showDialog<void>(
+    context: context,
+    builder: (dialog) => AlertDialog(
+      title: Text('Connect ${profile.displayName}'),
+      content: Form(
+        key: form,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(endpoint.isEmpty ? 'Endpoint is required.' : endpoint),
+            TextFormField(
+              controller: username,
+              decoration: const InputDecoration(labelText: 'Username'),
+              validator: (v) => v?.trim().isEmpty ?? true ? 'Required' : null,
+            ),
+            TextFormField(
+              controller: password,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Password'),
+              validator: (v) => v?.isEmpty ?? true ? 'Required' : null,
+            ),
+            const Text('Credential disimpan Android Keystore.'),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialog),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: endpoint.isEmpty
+              ? null
+              : () async {
+                  if (!(form.currentState?.validate() ?? false)) return;
+                  await CredentialStore().save(
+                    profile.id,
+                    GatewayCredentials(username.text.trim(), password.text),
+                  );
+                  await app.connect(
+                    HermesGatewayConnector(
+                      HermesGatewayConfig(
+                        baseUrl: Uri.parse(endpoint),
+                        provider: 'basic',
+                        username: username.text.trim(),
+                        password: password.text,
+                      ),
+                    ),
+                  );
+                  if (!app.isDemo) {
+                    await app.loadWorkspaces(
+                      profile.values['workspacePath'] as String?,
+                    );
+                    if (app.workspacePath case final selected?) {
+                      await settings.updateProfile(
+                        profile.id,
+                        profile.displayName,
+                        {...profile.values, 'workspacePath': selected},
+                      );
+                    }
+                  }
+                  if (dialog.mounted) {
+                    Navigator.pop(dialog);
+                    if (app.connectorError != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(app.connectorError!)),
+                      );
+                    }
+                  }
+                },
+          child: const Text('Connect'),
+        ),
+      ],
     ),
   );
 }

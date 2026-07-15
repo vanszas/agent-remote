@@ -354,8 +354,11 @@ class AgentSession {
     this.messages = const [],
     this.draftText = '',
     this.status = SessionStatus.idle,
+    this.preview = '',
+    this.messageCount = 0,
   });
-  final String id, title, workspaceName, draftText;
+  final String id, title, workspaceName, draftText, preview;
+  final int messageCount;
   final DateTime createdAt, updatedAt;
   final bool isPinned, isArchived;
   final String? connectionProfileId, activeModelName;
@@ -368,6 +371,8 @@ class AgentSession {
     List<ChatMessage>? messages,
     String? draftText,
     SessionStatus? status,
+    String? preview,
+    int? messageCount,
   }) => AgentSession(
     id: id,
     title: title ?? this.title,
@@ -381,6 +386,8 @@ class AgentSession {
     messages: messages ?? this.messages,
     draftText: draftText ?? this.draftText,
     status: status ?? this.status,
+    preview: preview ?? this.preview,
+    messageCount: messageCount ?? this.messageCount,
   );
   Map<String, Object?> toJson() => {
     'id': id,
@@ -395,6 +402,8 @@ class AgentSession {
     'messages': messages.map((e) => e.toJson()).toList(),
     'draftText': draftText,
     'status': status.name,
+    'preview': preview,
+    'messageCount': messageCount,
   };
   factory AgentSession.fromJson(Map<String, Object?> j) => AgentSession(
     id: j['id'] as String? ?? '',
@@ -414,6 +423,8 @@ class AgentSession {
         .toList(),
     draftText: j['draftText'] as String? ?? '',
     status: _enum(SessionStatus.values, j['status'], SessionStatus.idle),
+    preview: j['preview'] as String? ?? '',
+    messageCount: (j['messageCount'] as num?)?.toInt() ?? 0,
   );
 }
 

@@ -6,7 +6,7 @@ import 'models.dart';
 
 class AppController extends ChangeNotifier {
   AppController(this.connector, this.store);
-  final AgentConnector connector;
+  AgentConnector connector;
   final LocalStore store;
   final sessions = <AgentSession>[];
   StreamSubscription<AgentEvent>? _sub;
@@ -16,6 +16,12 @@ class AppController extends ChangeNotifier {
   String search = '';
   AgentCapabilities capabilities = const AgentCapabilities();
   String? connectorError;
+  bool loadingSession = false;
+  List<AgentWorkspace> workspaces = const [];
+  List<AgentTask> tasks = const [];
+  String? workspacePath;
+  bool get isDemo => connector is DemoAgentConnector;
+  String get connectorLabel => isDemo ? 'Demo Mode' : 'Hermes Connected';
   AgentSession? get current =>
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
@@ -28,6 +34,30 @@ class AppController extends ChangeNotifier {
       connectorError = 'Demo connector could not be initialized.';
       await _sub?.cancel();
       _sub = null;
+    }
+    notifyListeners();
+  }
+
+  Future<void> connect(AgentConnector next) async {
+    final nextEvents = next.events.listen(_event);
+    try {
+      await next.initialize();
+      final nextCapabilities = await next.getCapabilities();
+      final nextSessions = await next.listSessions();
+      await _sub?.cancel();
+      await connector.dispose();
+      connector = next;
+      _sub = nextEvents;
+      capabilities = nextCapabilities;
+      sessions
+        ..clear()
+        ..addAll(nextSessions);
+      currentId = null;
+      connectorError = null;
+    } catch (error) {
+      await nextEvents.cancel();
+      await next.dispose();
+      connectorError = _connectionError(error);
     }
     notifyListeners();
   }
@@ -81,6 +111,11 @@ class AppController extends ChangeNotifier {
   }
 
   void _event(AgentEvent e) {
+    if (e.type == AgentEventType.sessionUpdated && e.sessionId.isEmpty) {
+      reloadSessions();
+      return;
+    }
+    // Gateway connector translates live IDs before emitting; never guess a session.
     final s = sessions.where((x) => x.id == e.sessionId).firstOrNull;
     if (s == null) return;
     var messages = [...s.messages];
@@ -108,13 +143,18 @@ class AppController extends ChangeNotifier {
         break;
       case AgentEventType.toolStarted:
         if (ai != null) {
+          final isSubagent = e.data['child_session_id'] != null;
+          final toolName =
+              e.data['name'] as String? ?? (isSubagent ? 'subagent' : 'tool');
           messages[messages.indexOf(ai)] = ai.copyWith(
             toolActivities: [
               ToolActivity(
                 id: id,
-                toolName: 'inspect',
-                displayName: e.text,
-                summary: 'Simulated only',
+                toolName: toolName,
+                displayName: isSubagent
+                    ? 'Running background task'
+                    : 'Running $toolName',
+                summary: e.text.isNotEmpty ? e.text : 'Running...',
                 status: ToolActivityStatus.running,
                 startedAt: DateTime.now(),
               ),
@@ -125,16 +165,17 @@ class AppController extends ChangeNotifier {
       case AgentEventType.toolProgress:
         if (ai != null && ai.toolActivities.isNotEmpty) {
           final t = ai.toolActivities.first;
+          final pct = e.data['progress'] as double?;
           messages[messages.indexOf(ai)] = ai.copyWith(
             toolActivities: [
               ToolActivity(
                 id: t.id,
                 toolName: t.toolName,
                 displayName: t.displayName,
-                summary: t.summary,
+                summary: e.text.isNotEmpty ? e.text : t.summary,
                 status: ToolActivityStatus.running,
                 startedAt: t.startedAt,
-                progress: e.data['progress'] as double?,
+                progress: pct,
               ),
             ],
           );
@@ -320,8 +361,53 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void open(AgentSession s) {
+  int listLimit = 200;
+
+  Future<void> loadMore() async {
+    listLimit += 200;
+    await reloadSessions();
+  }
+
+  Future<void> reloadTasks() async {
+    tasks = await connector.listTasks();
+    notifyListeners();
+  }
+
+  Future<void> reloadSessions() async {
+    final remote = await connector.listSessions(limit: listLimit);
+    sessions
+      ..clear()
+      ..addAll(remote);
+    await _save();
+    notifyListeners();
+  }
+
+  Future<void> loadWorkspaces([String? preferred]) async {
+    workspaces = await connector.listWorkspaces();
+    final selected =
+        workspaces.where((x) => x.path == preferred).firstOrNull ??
+        workspaces.where((x) => x.isActive).firstOrNull ??
+        workspaces.firstOrNull;
+    if (selected != null) await selectWorkspace(selected.path);
+  }
+
+  Future<void> selectWorkspace(String path) async {
+    connector.selectWorkspace(path);
+    workspacePath = path;
+    await reloadSessions();
+  }
+
+  Future<void> open(AgentSession s) async {
     currentId = s.id;
+    loadingSession = true;
+    notifyListeners();
+    try {
+      _replace(await connector.loadSession(s.id));
+    } catch (error) {
+      connectorError = _connectionError(error);
+    } finally {
+      loadingSession = false;
+    }
     notifyListeners();
   }
 
@@ -360,6 +446,21 @@ class AppController extends ChangeNotifier {
 }
 
 enum ThemeModeChoice { system, light, dark }
+
+String _connectionError(Object error) {
+  final text = error.toString();
+  if (text.contains('HTTP 401')) {
+    return 'Login rejected. Check username or password.';
+  }
+  if (text.contains('HTTP 403')) return 'Gateway rejected this connection.';
+  if (text.contains('timed out')) {
+    return 'Connection timed out. Check endpoint and Tailscale.';
+  }
+  if (text.contains('HandshakeException')) {
+    return 'HTTPS certificate or Tailscale connection failed.';
+  }
+  return 'Gateway connection failed: ${text.length > 120 ? text.substring(0, 120) : text}';
+}
 
 String _titleFrom(String text) {
   final firstLine = text.trim().split('\n').first;

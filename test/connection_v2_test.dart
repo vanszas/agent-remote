@@ -80,4 +80,14 @@ void main() {
     );
     expect((await store.load()).selectedProviderId, 'remote');
   });
+
+  test('concurrent saves use distinct temporary files', () async {
+    final dir = await Directory.systemTemp.createTemp();
+    final store = ConnectionProfileStore(directory: dir);
+    await Future.wait([
+      store.save(const ConnectionSettingsSnapshot(selectedProviderId: 'one')),
+      store.save(const ConnectionSettingsSnapshot(selectedProviderId: 'two')),
+    ]);
+    expect((await store.load()).selectedProviderId, 'two');
+  });
 }

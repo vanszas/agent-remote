@@ -274,7 +274,9 @@ class ConnectionProfileStore {
       selectedProviderId: snapshot.selectedProviderId,
       profiles: List.unmodifiable(snapshot.profiles),
     );
-    return _writes = _writes.then((_) => _save(copy));
+    final write = _writes.catchError((_) {}).then((_) => _save(copy));
+    _writes = write;
+    return write;
   }
 
   Future<void> _save(ConnectionSettingsSnapshot snapshot) async {

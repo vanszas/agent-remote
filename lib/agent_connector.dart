@@ -246,6 +246,8 @@ class DemoAgentConnector implements AgentConnector {
   @override
   Future<void> stopGeneration(String id) async {
     _cancelled.add(id);
+    _pendingApprovals.removeWhere((_, sessionId) => sessionId == id);
+    _pendingClarifications.removeWhere((_, sessionId) => sessionId == id);
     _emit(AgentEvent(AgentEventType.generationStopped, sessionId: id));
   }
 
@@ -278,11 +280,12 @@ class DemoAgentConnector implements AgentConnector {
     required String requestId,
     required String answer,
   }) async {
-    final sessionId = _pendingClarifications.remove(requestId);
+    final sessionId = _pendingClarifications[requestId];
     if (sessionId == null) {
       throw StateError('Clarification request is not pending');
     }
     if (answer.trim().isEmpty) throw ArgumentError('Answer is required');
+    _pendingClarifications.remove(requestId);
     _emit(
       AgentEvent(
         AgentEventType.clarificationResolved,

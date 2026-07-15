@@ -15,13 +15,20 @@ class AppController extends ChangeNotifier {
   int page = 0;
   String search = '';
   AgentCapabilities capabilities = const AgentCapabilities();
+  String? connectorError;
   AgentSession? get current =>
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
     sessions.addAll(await store.load());
     _sub = connector.events.listen(_event);
-    await connector.initialize();
-    capabilities = await connector.getCapabilities();
+    try {
+      await connector.initialize();
+      capabilities = await connector.getCapabilities();
+    } catch (_) {
+      connectorError = 'Demo connector could not be initialized.';
+      await _sub?.cancel();
+      _sub = null;
+    }
     notifyListeners();
   }
 

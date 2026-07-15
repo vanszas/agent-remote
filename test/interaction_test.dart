@@ -105,6 +105,53 @@ void main() {
     },
   );
 
+  test('empty clarification keeps request pending', () async {
+    final connector = DemoAgentConnector(delay: Duration.zero);
+    await connector.initialize();
+    final session = await connector.createSession();
+    final requested = eventOf(
+      connector.events,
+      AgentEventType.clarificationRequested,
+    );
+    await connector.sendPrompt(
+      sessionId: session.id,
+      text: '/demo clarify',
+      attachments: const [],
+    );
+    final id = (await requested).correlationId!;
+    await expectLater(
+      connector.respondToClarification(requestId: id, answer: ' '),
+      throwsArgumentError,
+    );
+    await connector.respondToClarification(requestId: id, answer: 'Fast');
+    await connector.dispose();
+  });
+
+  test('stop cancels pending approval', () async {
+    final connector = DemoAgentConnector(delay: Duration.zero);
+    await connector.initialize();
+    final session = await connector.createSession();
+    final requested = eventOf(
+      connector.events,
+      AgentEventType.approvalRequested,
+    );
+    await connector.sendPrompt(
+      sessionId: session.id,
+      text: '/demo approval',
+      attachments: const [],
+    );
+    final id = (await requested).correlationId!;
+    await connector.stopGeneration(session.id);
+    await expectLater(
+      connector.respondToApproval(
+        requestId: id,
+        decision: ApprovalDecision.approve,
+      ),
+      throwsStateError,
+    );
+    await connector.dispose();
+  });
+
   test('typed requests serialize with unknown enum fallback', () {
     final now = DateTime.utc(2026);
     final approval = ApprovalRequest(

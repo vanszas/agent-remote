@@ -63,4 +63,21 @@ void main() {
     await controller.initialize();
     expect(() => controller.addProfile('Office', {}), throwsArgumentError);
   });
+
+  test('failed write does not poison later saves', () async {
+    final root = await Directory.systemTemp.createTemp();
+    final blocked = File('${root.path}${Platform.pathSeparator}blocked');
+    await blocked.writeAsString('file');
+    final store = ConnectionProfileStore(directory: Directory(blocked.path));
+    await expectLater(
+      store.save(const ConnectionSettingsSnapshot()),
+      throwsA(anything),
+    );
+    await blocked.delete();
+    await Directory(blocked.path).create();
+    await store.save(
+      const ConnectionSettingsSnapshot(selectedProviderId: 'remote'),
+    );
+    expect((await store.load()).selectedProviderId, 'remote');
+  });
 }

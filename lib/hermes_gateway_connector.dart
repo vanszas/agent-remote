@@ -259,8 +259,8 @@ class HermesGatewayConnector implements AgentConnector {
 
   @override
   Future<AgentCapabilities> getCapabilities() async => const AgentCapabilities(
-    supportsImages: false,
-    supportsFiles: false,
+    supportsImages: true,
+    supportsFiles: true,
     supportsSessionRename: true,
     supportsSessionDelete: true,
   );
@@ -478,12 +478,32 @@ class HermesGatewayConnector implements AgentConnector {
     required String text,
     required List<AgentAttachment> attachments,
   }) async {
-    if (attachments.isNotEmpty) {
-      throw UnsupportedError('Gateway attachments are not implemented yet.');
-    }
     final live = await _resume(sessionId);
+    final liveId = live['session_id'] as String;
+
+    // Upload attachments before submitting the prompt.
+    for (final a in attachments) {
+      final bytes = await File(a.localPath).readAsBytes();
+      final b64 = base64Encode(bytes);
+      if (a.mimeType.startsWith('image/')) {
+        await _rpc('image.attach_bytes', {
+          'session_id': liveId,
+          'content_base64': b64,
+          'filename': a.originalName,
+        });
+      } else {
+        // data_url format: "data:<mime>;base64,<data>"
+        final dataUrl = 'data:${a.mimeType};base64,$b64';
+        await _rpc('file.attach', {
+          'session_id': liveId,
+          'data_url': dataUrl,
+          'name': a.originalName,
+        });
+      }
+    }
+
     await _rpc('prompt.submit', {
-      'session_id': live['session_id'],
+      'session_id': liveId,
       'text': text,
     });
   }

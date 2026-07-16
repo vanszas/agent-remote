@@ -114,6 +114,23 @@ class AppShell extends StatelessWidget {
   final ConnectionSettingsController connections;
   @override
   Widget build(BuildContext context) {
+    if (c.takeConnectedNotice()) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white),
+                SizedBox(width: 12),
+                Expanded(child: Text('Connected to Hermes PC')),
+              ],
+            ),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      });
+    }
     if (c.current != null) return ChatScreen(c);
     final wide = MediaQuery.sizeOf(context).width >= 700;
     final pages = [
@@ -126,7 +143,22 @@ class AppShell extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Hermes Remote'),
         actions: [
-          Chip(label: Text(c.connectorLabel)),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Chip(
+              avatar: Icon(
+                Icons.circle,
+                size: 12,
+                color: c.connected ? Colors.greenAccent : Colors.redAccent,
+              ),
+              label: Text(c.connectorLabel),
+              side: BorderSide(
+                color: c.connected
+                    ? Colors.green.withValues(alpha: .45)
+                    : Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+          ),
           IconButton(
             tooltip: 'New chat',
             onPressed: c.newSession,
@@ -189,9 +221,11 @@ class ChatsPage extends StatelessWidget {
           style: Theme.of(context).textTheme.headlineSmall,
         ),
         Text(
-          c.isDemo
-              ? 'Full local demo. No backend connection.'
-              : 'Connected to Hermes gateway.',
+          c.connected
+              ? 'Synced with Hermes PC · PC controls execution.'
+              : c.isDemo
+              ? 'Offline preview · Connect a PC to sync.'
+              : 'Reconnecting to Hermes PC…',
         ),
         if (!c.isDemo && c.workspaces.isNotEmpty)
           DropdownButtonFormField<String>(
@@ -697,17 +731,47 @@ class _TasksPageState extends State<TasksPage> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text('Tasks', style: Theme.of(context).textTheme.headlineSmall),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'PC activity',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
+              Badge(
+                label: Text('${c.tasks.length}'),
+                child: const Icon(Icons.monitor_heart_outlined),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Live work executed by Hermes PC. This phone never runs commands.',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 12),
           if (c.tasks.isEmpty)
-            const ListTile(
-              leading: Icon(Icons.task_alt),
-              title: Text('No active tasks'),
+            const Card(
+              child: ListTile(
+                leading: Icon(Icons.check_circle_outline),
+                title: Text('PC is idle'),
+                subtitle: Text('No active turns or background tasks.'),
+              ),
             ),
           ...c.tasks.map(
-            (task) => ListTile(
-              leading: const CircularProgressIndicator(),
-              title: Text(task.title),
-              subtitle: Text(task.status),
+            (task) => Card(
+              child: ListTile(
+                leading: const SizedBox.square(
+                  dimension: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                ),
+                title: Text(task.title),
+                subtitle: Text(task.status),
+                trailing: const Icon(Icons.computer),
+              ),
             ),
           ),
         ],

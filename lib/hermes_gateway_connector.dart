@@ -383,7 +383,7 @@ class HermesGatewayConnector implements AgentConnector {
 
   @override
   Future<List<AgentTask>> listTasks() async {
-    final result = await _rpc('delegation.status');
+    final result = await _rpc('activity.status');
     return (result['active'] as List? ?? const []).whereType<Map>().map((raw) {
       final task = Map<String, Object?>.from(raw);
       return AgentTask(

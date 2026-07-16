@@ -10,18 +10,27 @@ class AppController extends ChangeNotifier {
   final LocalStore store;
   final sessions = <AgentSession>[];
   StreamSubscription<AgentEvent>? _sub;
+  Timer? _taskTimer;
   String? currentId;
   ThemeModeChoice theme = ThemeModeChoice.system;
   int page = 0;
   String search = '';
   AgentCapabilities capabilities = const AgentCapabilities();
   String? connectorError;
+  bool connected = false;
+  bool _connectedNotice = false;
   bool loadingSession = false;
   List<AgentWorkspace> workspaces = const [];
   List<AgentTask> tasks = const [];
   String? workspacePath;
   bool get isDemo => connector is DemoAgentConnector;
-  String get connectorLabel => isDemo ? 'Demo Mode' : 'Hermes Connected';
+  String get connectorLabel => connected ? 'PC connected' : 'Disconnected';
+  bool takeConnectedNotice() {
+    final value = _connectedNotice;
+    _connectedNotice = false;
+    return value;
+  }
+
   AgentSession? get current =>
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
@@ -53,10 +62,19 @@ class AppController extends ChangeNotifier {
         ..clear()
         ..addAll(nextSessions);
       currentId = null;
+      connected = true;
+      _connectedNotice = true;
       connectorError = null;
+      _taskTimer?.cancel();
+      await reloadTasks();
+      _taskTimer = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => reloadTasks(),
+      );
     } catch (error) {
       await nextEvents.cancel();
       await next.dispose();
+      connected = false;
       connectorError = _connectionError(error);
     }
     notifyListeners();
@@ -113,6 +131,16 @@ class AppController extends ChangeNotifier {
   }
 
   void _event(AgentEvent e) {
+    if (e.type == AgentEventType.connectorReady) {
+      notifyListeners();
+      return;
+    }
+    if (e.type == AgentEventType.connectorError) {
+      connected = false;
+      connectorError = e.text;
+      notifyListeners();
+      return;
+    }
     if (e.type == AgentEventType.sessionUpdated && e.sessionId.isEmpty) {
       reloadSessions();
       return;
@@ -371,8 +399,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> reloadTasks() async {
-    tasks = await connector.listTasks();
-    notifyListeners();
+    if (!connected) return;
+    try {
+      tasks = await connector.listTasks();
+      notifyListeners();
+    } catch (_) {}
   }
 
   Future<void> reloadSessions() async {
@@ -441,6 +472,7 @@ class AppController extends ChangeNotifier {
   Future<void> _save() => store.save(sessions);
   @override
   void dispose() {
+    _taskTimer?.cancel();
     _sub?.cancel();
     connector.dispose();
     super.dispose();

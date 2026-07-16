@@ -263,7 +263,7 @@ class HermesGatewayConnector implements AgentConnector {
     supportsFiles: true,
     supportsSessionRename: true,
     supportsSessionDelete: true,
-    supportsAgentExecution: false,
+    supportsAgentExecution: true,
   );
 
   @override
@@ -503,8 +503,8 @@ class HermesGatewayConnector implements AgentConnector {
       }
     }
 
-    // ponytail: phone is a remote composer; PC owns agent execution.
-    await _rpc('session.append_user', {'session_id': liveId, 'text': text});
+    // The PC gateway owns execution; Android only submits to its resumed session.
+    await _rpc('prompt.submit', {'session_id': liveId, 'text': text});
   }
 
   @override

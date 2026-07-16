@@ -68,6 +68,7 @@ class AgentCapabilities {
     this.supportsStop = true,
     this.supportsModelSelection = false,
     this.supportsWorkspaces = true,
+    this.supportsAgentExecution = true,
   });
   final bool supportsImages,
       supportsFiles,
@@ -79,7 +80,8 @@ class AgentCapabilities {
       supportsSessionDelete,
       supportsStop,
       supportsModelSelection,
-      supportsWorkspaces;
+      supportsWorkspaces,
+      supportsAgentExecution;
 }
 
 abstract class AgentConnector {

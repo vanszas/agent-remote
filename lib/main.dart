@@ -78,11 +78,25 @@ class HermesRemoteApp extends StatelessWidget {
     builder: (_, _) => MaterialApp(
       title: 'Hermes Remote',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.deepPurple, useMaterial3: true),
+      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
       darkTheme: ThemeData(
-        colorSchemeSeed: Colors.deepPurple,
         brightness: Brightness.dark,
         useMaterial3: true,
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF9DB2FF),
+          secondary: Color(0xFFB7C4FF),
+          surface: Color(0xFF111318),
+          surfaceContainer: Color(0xFF1A1D24),
+        ),
+        scaffoldBackgroundColor: const Color(0xFF0B0D12),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF0B0D12),
+          surfaceTintColor: Colors.transparent,
+        ),
+        cardTheme: const CardThemeData(
+          elevation: 0,
+          margin: EdgeInsets.symmetric(vertical: 4),
+        ),
       ),
       themeMode: switch (controller.theme) {
         ThemeModeChoice.light => ThemeMode.light,
@@ -251,9 +265,17 @@ class SessionTile extends StatelessWidget {
   final AgentSession s;
   @override
   Widget build(BuildContext context) => Card(
+    clipBehavior: Clip.antiAlias,
     child: ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       onTap: () => c.open(s),
-      leading: Icon(s.isPinned ? Icons.push_pin : Icons.chat_outlined),
+      leading: CircleAvatar(
+        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+        child: Icon(
+          s.isPinned ? Icons.push_pin : Icons.chat_bubble_outline,
+          color: Theme.of(context).colorScheme.onPrimaryContainer,
+        ),
+      ),
       title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
         s.messages.lastOrNull?.content ??
@@ -320,8 +342,15 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             Text(s.title),
             Text(
-              c.isDemo ? 'Demo Mode • local only' : 'Hermes gateway',
-              style: const TextStyle(fontSize: 12),
+              c.isDemo
+                  ? 'Demo Mode • local only'
+                  : c.capabilities.supportsAgentExecution
+                  ? 'Connected • agent runs here'
+                  : 'Remote composer • sent to PC',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ],
         ),
@@ -376,8 +405,16 @@ class _ChatScreenState extends State<ChatScreen> {
                         .toList()
                   : [],
             ),
-            Padding(
-              padding: const EdgeInsets.all(8),
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              padding: const EdgeInsets.fromLTRB(6, 8, 6, 6),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+              ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [

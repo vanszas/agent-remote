@@ -97,7 +97,9 @@ class AppController extends ChangeNotifier {
             ? _titleFrom(text)
             : s.title,
         messages: [...s.messages, user],
-        status: SessionStatus.generating,
+        status: capabilities.supportsAgentExecution
+            ? SessionStatus.generating
+            : SessionStatus.idle,
         updatedAt: now,
       ),
     );

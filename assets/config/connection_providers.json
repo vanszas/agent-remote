@@ -4,8 +4,8 @@
     {
       "id": "local_gateway",
       "mode": "localGateway",
-      "displayName": "Local gateway",
-      "description": "Run the agent gateway on this device. Mobile integration is deferred.",
+      "displayName": "Local agent gateway",
+      "description": "Connect to agent runtimes available on this device.",
       "iconKey": "desktop",
       "sortOrder": 30,
       "enabled": true,
@@ -16,10 +16,10 @@
       "configurationFields": []
     },
     {
-      "id": "hermes_cloud",
+      "id": "managed_agent_cloud",
       "mode": "hermesCloud",
-      "displayName": "Hermes Cloud",
-      "description": "Use a managed Hermes service. Sign-in arrives in the final integration phase.",
+      "displayName": "Managed agent cloud",
+      "description": "Connect to a managed remote agent service.",
       "iconKey": "cloud",
       "sortOrder": 20,
       "enabled": true,
@@ -32,8 +32,8 @@
     {
       "id": "remote_gateway",
       "mode": "remoteGateway",
-      "displayName": "Remote gateway",
-      "description": "Save remote gateway profile metadata now; connection remains deferred.",
+      "displayName": "PC agent gateway",
+      "description": "Control agent CLIs detected automatically on your PC.",
       "iconKey": "remote",
       "sortOrder": 10,
       "enabled": true,

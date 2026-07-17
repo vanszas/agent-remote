@@ -43,6 +43,7 @@ class HermesGatewayConnector implements AgentConnector {
   final _storedSessionIds = <String, String>{};
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
+  Future<void>? _connecting;
   int _nextId = 1;
   bool _closed = false;
 
@@ -141,14 +142,34 @@ class HermesGatewayConnector implements AgentConnector {
     );
   }
 
-  void _onSocketError(Object _) => _emit(
-    const AgentEvent(
-      AgentEventType.connectorError,
-      sessionId: '',
-      text: 'Gateway WebSocket failed.',
-    ),
-  );
+  Future<void> _ensureConnected() async {
+    if (_socket != null) return;
+    final pending = _connecting;
+    if (pending != null) return pending;
+    final future = () async {
+      await _connect(await _ticket());
+    }();
+    _connecting = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_connecting, future)) _connecting = null;
+    }
+  }
+
+  void _onSocketError(Object _) {
+    _socket = null;
+    _emit(
+      const AgentEvent(
+        AgentEventType.connectorError,
+        sessionId: '',
+        text: 'Gateway WebSocket failed.',
+      ),
+    );
+  }
+
   void _onSocketDone() {
+    _socket = null;
     if (!_closed) {
       _emit(
         const AgentEvent(
@@ -237,7 +258,8 @@ class HermesGatewayConnector implements AgentConnector {
   Future<Map<String, Object?>> _rpc(
     String method, [
     Map<String, Object?> params = const {},
-  ]) {
+  ]) async {
+    await _ensureConnected();
     final socket = _socket;
     if (socket == null) {
       return Future.error(StateError('Gateway is disconnected.'));
@@ -295,8 +317,8 @@ class HermesGatewayConnector implements AgentConnector {
         title: map['title'] as String? ?? 'Untitled',
         createdAt: at,
         updatedAt: at,
-        workspaceName: 'Hermes gateway',
-        activeModelName: 'Hermes',
+        workspaceName: 'Agent gateway',
+        activeModelName: 'PC Agent',
         preview: preview,
         messageCount: msgCount,
       );
@@ -327,8 +349,8 @@ class HermesGatewayConnector implements AgentConnector {
       title: 'New chat',
       createdAt: now,
       updatedAt: now,
-      workspaceName: workspaceName ?? 'Hermes gateway',
-      activeModelName: modelName ?? 'Hermes',
+      workspaceName: workspaceName ?? 'Agent gateway',
+      activeModelName: modelName ?? 'PC Agent',
     );
     _sessions[storedId] = session;
     _emit(AgentEvent(AgentEventType.sessionCreated, sessionId: storedId));
@@ -454,8 +476,8 @@ class HermesGatewayConnector implements AgentConnector {
           title: 'Untitled',
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
-          workspaceName: 'Hermes gateway',
-          activeModelName: 'Hermes',
+          workspaceName: 'Agent gateway',
+          activeModelName: 'PC Agent',
         );
     // ponytail: merge — keep local messages that are newer than DB snapshot
     final remoteIds = remote.map((m) => m.id).toSet();
@@ -504,7 +526,11 @@ class HermesGatewayConnector implements AgentConnector {
     }
 
     // The PC gateway owns execution; Android only submits to its resumed session.
-    await _rpc('prompt.submit', {'session_id': liveId, 'text': text});
+    await _rpc('prompt.submit', {
+      'session_id': liveId,
+      'text': text,
+      'rebind_transport': false,
+    });
   }
 
   @override

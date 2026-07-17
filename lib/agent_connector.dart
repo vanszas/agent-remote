@@ -12,13 +12,79 @@ class AgentWorkspace {
   final bool isActive;
 }
 
+class AgentProject {
+  const AgentProject({required this.workspace, this.sessions = const []});
+  final AgentWorkspace workspace;
+  final List<AgentSession> sessions;
+}
+
+abstract interface class WorkspaceCatalog {
+  Future<List<AgentProject>> listProjects({int limit = 20});
+  Future<AgentWorkspace> activateWorkspace(String path);
+}
+
 class AgentTask {
   const AgentTask({
     required this.id,
     required this.title,
     required this.status,
+    this.sessionId = '',
+    this.detail = '',
+    this.agents = const [],
+    this.workspace = '',
+    this.permission = '',
+    this.createdAt,
+    this.updatedAt,
   });
-  final String id, title, status;
+  final String id, title, status, sessionId, detail, workspace, permission;
+  final List<String> agents;
+  final DateTime? createdAt, updatedAt;
+}
+
+enum GitFileStatus { added, modified, deleted, untracked }
+
+class GitStatusEntry {
+  const GitStatusEntry(this.path, this.status);
+  final String path;
+  final GitFileStatus status;
+}
+
+class GitCommit {
+  const GitCommit({
+    required this.hash,
+    required this.subject,
+    required this.author,
+  });
+  final String hash, subject, author;
+}
+
+class GitRepositoryStatus {
+  const GitRepositoryStatus({
+    this.isGitRepository = false,
+    this.branch = '',
+    this.remoteUrl = '',
+    this.ahead = 0,
+    this.behind = 0,
+    this.githubOwner = '',
+    this.githubRepository = '',
+    this.githubAvatarUrl = '',
+    this.incoming = const [],
+    this.outgoing = const [],
+  });
+  final bool isGitRepository;
+  final String branch,
+      remoteUrl,
+      githubOwner,
+      githubRepository,
+      githubAvatarUrl;
+  final int ahead, behind;
+  final List<GitCommit> incoming, outgoing;
+}
+
+class WorkspaceEntry {
+  const WorkspaceEntry(this.name, this.path, this.isDirectory);
+  final String name, path;
+  final bool isDirectory;
 }
 
 enum AgentEventType {
@@ -82,6 +148,12 @@ class AgentCapabilities {
       supportsModelSelection,
       supportsWorkspaces,
       supportsAgentExecution;
+}
+
+abstract interface class WorkspaceMonitor {
+  Future<List<GitStatusEntry>> getGitStatus({bool fetch = false});
+  Future<GitRepositoryStatus> getGitRepositoryStatus({bool fetch = false});
+  Future<List<WorkspaceEntry>> listWorkspace(String path);
 }
 
 abstract class AgentConnector {

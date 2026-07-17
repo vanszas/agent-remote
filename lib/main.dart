@@ -8,8 +8,9 @@ import 'app_controller.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'connection.dart';
+import 'clipboard_image.dart';
 import 'credential_store.dart';
-import 'hermes_gateway_connector.dart';
+import 'hermes_remote_connector.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,23 +41,8 @@ void main() async {
   }
   final profile = connections.defaultProfile;
   final endpoint = profile?.values['endpoint'] as String?;
-  final credentials = profile == null
-      ? null
-      : await CredentialStore().load(profile.id);
-  if (profile != null &&
-      endpoint != null &&
-      endpoint.isNotEmpty &&
-      credentials != null) {
-    await c.connect(
-      HermesGatewayConnector(
-        HermesGatewayConfig(
-          baseUrl: Uri.parse(endpoint),
-          provider: 'basic',
-          username: credentials.username,
-          password: credentials.password,
-        ),
-      ),
-    );
+  if (profile != null && endpoint != null && endpoint.isNotEmpty) {
+    await c.connect(HermesRemoteConnector(Uri.parse(endpoint), ''));
     if (!c.isDemo) {
       await c.loadWorkspaces(profile.values['workspacePath'] as String?);
     }
@@ -76,7 +62,7 @@ class HermesRemoteApp extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: controller,
     builder: (_, _) => MaterialApp(
-      title: 'Hermes Remote',
+      title: 'Agent Remote',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
       darkTheme: ThemeData(
@@ -123,7 +109,7 @@ class AppShell extends StatelessWidget {
               children: [
                 Icon(Icons.check_circle, color: Colors.white),
                 SizedBox(width: 12),
-                Expanded(child: Text('Connected to Hermes PC')),
+                Expanded(child: Text('Terhubung ke Agent Remote PC')),
               ],
             ),
             behavior: SnackBarBehavior.floating,
@@ -141,29 +127,20 @@ class AppShell extends StatelessWidget {
     ];
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Hermes Remote'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _GithubAvatar(c.gitRepository, radius: 17),
+            const SizedBox(width: 10),
+            const Text('Agent Remote'),
+          ],
+        ),
         actions: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            child: Chip(
-              avatar: Icon(
-                Icons.circle,
-                size: 12,
-                color: c.connected ? Colors.greenAccent : Colors.redAccent,
-              ),
-              label: Text(c.connectorLabel),
-              side: BorderSide(
-                color: c.connected
-                    ? Colors.green.withValues(alpha: .45)
-                    : Theme.of(context).colorScheme.outlineVariant,
-              ),
-            ),
+          Icon(
+            c.connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+            color: c.connected ? Colors.greenAccent : null,
           ),
-          IconButton(
-            tooltip: 'New chat',
-            onPressed: c.newSession,
-            icon: const Icon(Icons.add_comment),
-          ),
+          const SizedBox(width: 16),
         ],
       ),
       body: Row(
@@ -201,10 +178,10 @@ class AppShell extends StatelessWidget {
 }
 
 const nav = [
-  (Icons.chat_bubble_outline, 'Chats'),
-  (Icons.task_alt, 'Tasks'),
-  (Icons.folder_outlined, 'Files'),
-  (Icons.settings_outlined, 'Settings'),
+  (Icons.chat_bubble_outline, 'Chat'),
+  (Icons.task_alt, 'Proses'),
+  (Icons.folder_outlined, 'File'),
+  (Icons.settings_outlined, 'Pengaturan'),
 ];
 
 class ChatsPage extends StatelessWidget {
@@ -222,22 +199,33 @@ class ChatsPage extends StatelessWidget {
         ),
         Text(
           c.connected
-              ? 'Synced with Hermes PC · PC controls execution.'
+              ? 'Terhubung ke Agent Remote PC - eksekusi berjalan di PC.'
               : c.isDemo
               ? 'Offline preview · Connect a PC to sync.'
-              : 'Reconnecting to Hermes PC…',
+              : 'Menghubungkan ulang ke Agent Remote PC…',
         ),
-        if (!c.isDemo && c.workspaces.isNotEmpty)
-          DropdownButtonFormField<String>(
-            initialValue: c.workspacePath,
-            decoration: const InputDecoration(labelText: 'Workspace PC'),
-            items: c.workspaces
-                .map(
-                  (w) => DropdownMenuItem(value: w.path, child: Text(w.name)),
-                )
-                .toList(),
-            onChanged: (path) => path == null ? null : c.selectWorkspace(path),
+        if (c.connector case final HermesRemoteConnector remote) ...[
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => showAgentSheet(context, c, remote),
+                  icon: const Icon(Icons.smart_toy_outlined),
+                  label: Text('Agent (${remote.selectedAgentIds.length})'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => showFolderSheet(context, c, remote),
+                  icon: const Icon(Icons.folder_outlined),
+                  label: const Text('Pilih folder'),
+                ),
+              ),
+            ],
           ),
+        ],
         const SizedBox(height: 12),
         SearchBar(
           hintText: 'Search sessions',
@@ -250,8 +238,11 @@ class ChatsPage extends StatelessWidget {
         const SizedBox(height: 12),
         Expanded(
           child: RefreshIndicator(
-            onRefresh: c.reloadSessions,
-            child: c.filtered.isEmpty
+            onRefresh: () async {
+              await c.reloadProjects();
+              await c.reloadSessions();
+            },
+            child: c.projects.isEmpty
                 ? ListView(
                     children: [
                       const SizedBox(height: 120),
@@ -267,24 +258,9 @@ class ChatsPage extends StatelessWidget {
                     ],
                   )
                 : ListView(
-                    children: [
-                      ...c.filtered
-                          .where((s) => s.isPinned)
-                          .map((s) => SessionTile(c, s)),
-                      ...c.filtered
-                          .where((s) => !s.isPinned)
-                          .map((s) => SessionTile(c, s)),
-                      if (c.filtered.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          child: Center(
-                            child: OutlinedButton(
-                              onPressed: c.loadMore,
-                              child: const Text('Load More History'),
-                            ),
-                          ),
-                        ),
-                    ],
+                    children: c.projects
+                        .map((project) => ProjectSessionGroup(c, project))
+                        .toList(),
                   ),
           ),
         ),
@@ -292,6 +268,414 @@ class ChatsPage extends StatelessWidget {
     ),
   );
 }
+
+Future<void> showAgentSheet(
+  BuildContext context,
+  AppController app,
+  HermesRemoteConnector remote,
+) => showModalBottomSheet<void>(
+  context: context,
+  isScrollControlled: true,
+  builder: (sheetContext) => StatefulBuilder(
+    builder: (context, setSheetState) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Agent PC', style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 12),
+            SegmentedButton<RemoteExecutionMode>(
+              segments: const [
+                ButtonSegment(
+                  value: RemoteExecutionMode.single,
+                  label: Text('Single'),
+                ),
+                ButtonSegment(
+                  value: RemoteExecutionMode.parallel,
+                  label: Text('Parallel'),
+                ),
+                ButtonSegment(
+                  value: RemoteExecutionMode.coordinator,
+                  label: Text('Koordinator'),
+                ),
+              ],
+              selected: {remote.executionMode},
+              onSelectionChanged: (value) {
+                setSheetState(() => remote.executionMode = value.first);
+                app.refresh();
+              },
+            ),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                remote.permissionMode == RemotePermissionMode.full
+                    ? Icons.gpp_maybe_outlined
+                    : Icons.shield_outlined,
+                color: remote.permissionMode == RemotePermissionMode.full
+                    ? Colors.orange
+                    : null,
+              ),
+              title: Text(
+                'Izin Codex - ${_permissionLabel(remote.permissionMode)}',
+              ),
+              subtitle: Text(
+                '${_permissionDescription(remote.permissionMode)}. Agent lain mengikuti policy CLI masing-masing.',
+              ),
+              trailing: PopupMenuButton<RemotePermissionMode>(
+                tooltip: 'Ubah izin agent',
+                initialValue: remote.permissionMode,
+                onSelected: (mode) async {
+                  await remote.setPermissionMode(mode);
+                  setSheetState(() {});
+                  app.refresh();
+                },
+                itemBuilder: (context) => RemotePermissionMode.values
+                    .map(
+                      (mode) => PopupMenuItem(
+                        value: mode,
+                        child: ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                            mode == RemotePermissionMode.full
+                                ? Icons.warning_amber_rounded
+                                : Icons.shield_outlined,
+                            color: mode == RemotePermissionMode.full
+                                ? Colors.orange
+                                : null,
+                          ),
+                          title: Text(_permissionLabel(mode)),
+                          subtitle: Text(_permissionDescription(mode)),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                icon: const Icon(Icons.expand_more),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: remote.availableAgents
+                    .map(
+                      (agent) => CheckboxListTile(
+                        value: remote.selectedAgentIds.contains(agent.id),
+                        onChanged: agent.installed
+                            ? (value) {
+                                setSheetState(() {
+                                  if (remote.executionMode ==
+                                      RemoteExecutionMode.single) {
+                                    remote.selectedAgentIds = {agent.id};
+                                  } else if (value == true) {
+                                    remote.selectedAgentIds = {
+                                      ...remote.selectedAgentIds,
+                                      agent.id,
+                                    };
+                                  } else if (remote.selectedAgentIds.length >
+                                      1) {
+                                    remote.selectedAgentIds = {
+                                      ...remote.selectedAgentIds,
+                                    }..remove(agent.id);
+                                  }
+                                  remote.coordinatorAgentId =
+                                      remote.selectedAgentIds.firstOrNull ?? '';
+                                });
+                                app.refresh();
+                              }
+                            : null,
+                        secondary: Icon(
+                          agent.installed
+                              ? Icons.check_circle_outline
+                              : Icons.download_outlined,
+                          color: agent.installed ? Colors.green : null,
+                        ),
+                        title: Text(agent.name),
+                        subtitle: Text(
+                          agent.installed
+                              ? 'Terpasang - ${agent.command}'
+                              : 'Didukung • CLI belum ditemukan di PC',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(sheetContext),
+              child: const Text('Selesai'),
+            ),
+          ],
+        ),
+      ),
+    ),
+  ),
+);
+
+Future<void> showFolderSheet(
+  BuildContext context,
+  AppController app,
+  HermesRemoteConnector remote,
+) async {
+  var listing = await remote.browsePcFolders(app.workspacePath ?? '');
+  if (!context.mounted) return;
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .78,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    IconButton(
+                      tooltip: 'Pilih disk',
+                      onPressed: () async {
+                        final next = await remote.browsePcFolders();
+                        setSheetState(() => listing = next);
+                      },
+                      icon: const Icon(Icons.storage_outlined),
+                    ),
+                    Expanded(
+                      child: Text(
+                        listing.path.isEmpty ? 'Pilih disk' : listing.path,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: listing.path.isEmpty
+                          ? null
+                          : () async {
+                              await app.selectWorkspace(listing.path);
+                              if (sheetContext.mounted) {
+                                Navigator.pop(sheetContext);
+                              }
+                            },
+                      child: const Text('Pakai'),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView(
+                  children: [
+                    if (listing.parent != null)
+                      ListTile(
+                        leading: const Icon(Icons.arrow_upward),
+                        title: const Text('Folder induk'),
+                        onTap: () async {
+                          final next = await remote.browsePcFolders(
+                            listing.parent!,
+                          );
+                          setSheetState(() => listing = next);
+                        },
+                      ),
+                    ...listing.folders.map(
+                      (folder) => ListTile(
+                        leading: const Icon(Icons.folder_outlined),
+                        title: Text(folder.name),
+                        subtitle: Text(
+                          folder.path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () async {
+                          final next = await remote.browsePcFolders(
+                            folder.path,
+                          );
+                          setSheetState(() => listing = next);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+String _permissionLabel(RemotePermissionMode mode) => switch (mode) {
+  RemotePermissionMode.ask => 'Ask for approval',
+  RemotePermissionMode.workspace => 'Otomatis di workspace',
+  RemotePermissionMode.full => 'Full access',
+};
+
+String _permissionDescription(RemotePermissionMode mode) => switch (mode) {
+  RemotePermissionMode.ask => 'Minta izin untuk tindakan yang tidak dipercaya',
+  RemotePermissionMode.workspace =>
+    'Boleh mengubah folder terpilih, tidak di luar folder',
+  RemotePermissionMode.full =>
+    'Tanpa sandbox; dapat mengakses seluruh PC dan internet',
+};
+
+class ProjectSessionGroup extends StatelessWidget {
+  const ProjectSessionGroup(this.c, this.project, {super.key});
+  final AppController c;
+  final AgentProject project;
+
+  @override
+  Widget build(BuildContext context) {
+    final query = c.search.trim().toLowerCase();
+    final sessions = project.sessions
+        .where(
+          (session) =>
+              query.isEmpty ||
+              session.title.toLowerCase().contains(query) ||
+              session.preview.toLowerCase().contains(query),
+        )
+        .toList();
+    if (query.isNotEmpty && sessions.isEmpty) return const SizedBox.shrink();
+    final active = project.workspace.path == c.workspacePath;
+    return Card(
+      color: active ? Theme.of(context).colorScheme.surfaceContainerHigh : null,
+      child: ExpansionTile(
+        initiallyExpanded: active || sessions.isNotEmpty,
+        leading: Icon(
+          active ? Icons.folder_open_outlined : Icons.folder_outlined,
+        ),
+        title: Text(project.workspace.name),
+        subtitle: Text(
+          project.workspace.path,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: active
+            ? const Icon(Icons.radio_button_checked, size: 18)
+            : const Icon(Icons.chevron_right),
+        onExpansionChanged: (expanded) {
+          if (expanded && !active) c.selectWorkspace(project.workspace.path);
+        },
+        children: sessions.isEmpty
+            ? const [ListTile(dense: true, title: Text('Belum ada session'))]
+            : sessions
+                  .map((session) => ProjectSessionTile(c, project, session))
+                  .toList(),
+      ),
+    );
+  }
+}
+
+class ProjectSessionTile extends StatelessWidget {
+  const ProjectSessionTile(this.c, this.project, this.session, {super.key});
+  final AppController c;
+  final AgentProject project;
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final task = c.tasks
+        .where(
+          (item) => item.sessionId == session.id && item.status == 'running',
+        )
+        .firstOrNull;
+    final running = task != null || session.status == SessionStatus.generating;
+    final colors = Theme.of(context).colorScheme;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      margin: const EdgeInsets.fromLTRB(24, 3, 8, 3),
+      decoration: BoxDecoration(
+        color: running ? colors.primaryContainer.withValues(alpha: .28) : null,
+        borderRadius: BorderRadius.circular(14),
+        border: running
+            ? Border(left: BorderSide(color: colors.primary, width: 4))
+            : null,
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        leading: running
+            ? SizedBox.square(
+                dimension: 30,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: colors.primary,
+                    ),
+                    Icon(Icons.bolt, size: 16, color: colors.primary),
+                  ],
+                ),
+              )
+            : const Icon(Icons.chat_bubble_outline, size: 20),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (running)
+              Text(
+                'SEDANG MENGERJAKAN',
+                style: TextStyle(
+                  color: colors.primary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: .7,
+                ),
+              ),
+            Text(
+              session.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontWeight: running ? FontWeight.w700 : null),
+            ),
+          ],
+        ),
+        subtitle: running
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 4),
+                  LinearProgressIndicator(
+                    minHeight: 3,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    task?.detail.isNotEmpty == true
+                        ? task!.detail
+                        : 'Agent sedang berpikir...',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (task != null)
+                    Text(
+                      '${task.agents.join(' + ')} - ${_taskPermissionLabel(task.permission)}',
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                ],
+              )
+            : session.preview.isEmpty
+            ? null
+            : Text(
+                session.preview,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+        trailing: Icon(running ? Icons.arrow_forward : Icons.chevron_right),
+        onTap: () => c.openProjectSession(project, session),
+      ),
+    );
+  }
+}
+
+String _taskPermissionLabel(String permission) => switch (permission) {
+  'ask' => 'Ask approval',
+  'full' => 'Full access',
+  _ => 'Workspace access',
+};
 
 class SessionTile extends StatelessWidget {
   const SessionTile(this.c, this.s, {super.key});
@@ -365,12 +749,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final c = widget.c, s = c.current!;
     return Scaffold(
       appBar: AppBar(
-        leading: BackButton(
-          onPressed: () {
-            c.currentId = null;
-            c.refresh();
-          },
-        ),
+        leading: BackButton(onPressed: c.closeCurrentSession),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -398,9 +777,28 @@ class _ChatScreenState extends State<ChatScreen> {
                   : ListView.builder(
                       reverse: true,
                       padding: const EdgeInsets.all(12),
-                      itemCount: s.messages.length,
-                      itemBuilder: (_, i) =>
-                          MessageCard(s.messages[s.messages.length - 1 - i], c),
+                      itemCount:
+                          s.messages.length +
+                          (s.status == SessionStatus.generating &&
+                                  (s.messages.isEmpty ||
+                                      s.messages.last.role !=
+                                          MessageRole.assistant)
+                              ? 1
+                              : 0),
+                      itemBuilder: (_, i) {
+                        final showRunning =
+                            s.status == SessionStatus.generating &&
+                            (s.messages.isEmpty ||
+                                s.messages.last.role != MessageRole.assistant);
+                        if (showRunning && i == 0) {
+                          return const _RunningAgentCard();
+                        }
+                        final offset = showRunning ? 1 : 0;
+                        return MessageCard(
+                          s.messages[s.messages.length - 1 - (i - offset)],
+                          c,
+                        );
+                      },
                     ),
             ),
             if (pending.isNotEmpty)
@@ -469,6 +867,12 @@ class _ChatScreenState extends State<ChatScreen> {
                             value: 'camera',
                             child: Text('Camera'),
                           ),
+                        if (c.capabilities.supportsImages)
+                          const PopupMenuItem(
+                            value: 'clipboard',
+                            child: Text('Tempel gambar clipboard'),
+                          ),
+
                         if (c.capabilities.supportsFiles)
                           const PopupMenuItem(
                             value: 'file',
@@ -481,10 +885,26 @@ class _ChatScreenState extends State<ChatScreen> {
                       controller: text,
                       maxLines: 5,
                       minLines: 1,
+                      contextMenuBuilder: (context, editableTextState) {
+                        final items = [
+                          ...editableTextState.contextMenuButtonItems,
+                          ContextMenuButtonItem(
+                            label: 'Paste gambar',
+                            onPressed: () {
+                              editableTextState.hideToolbar();
+                              pick('clipboard');
+                            },
+                          ),
+                        ];
+                        return AdaptiveTextSelectionToolbar.buttonItems(
+                          anchors: editableTextState.contextMenuAnchors,
+                          buttonItems: items,
+                        );
+                      },
                       decoration: InputDecoration(
                         hintText: c.isDemo
-                            ? 'Message Demo Agent'
-                            : 'Message Hermes',
+                            ? 'Kirim pesan ke Demo Agent'
+                            : 'Instruksikan agent di PC...',
                         border: const OutlineInputBorder(),
                       ),
                     ),
@@ -524,6 +944,14 @@ class _ChatScreenState extends State<ChatScreen> {
         final picked = (await FilePicker.platform.pickFiles())?.files.single;
         path = picked?.path;
         originalName = picked?.name;
+      } else if (kind == 'clipboard') {
+        final picked = await readClipboardImage();
+        if (picked == null) {
+          throw StateError('Clipboard tidak berisi gambar yang bisa dibaca.');
+        }
+        path = picked.path;
+        originalName = picked.name;
+        sourceMime = picked.mimeType;
       } else {
         final picked = await ImagePicker().pickImage(
           source: kind == 'camera' ? ImageSource.camera : ImageSource.gallery,
@@ -576,6 +1004,30 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
   }
+}
+
+class _RunningAgentCard extends StatelessWidget {
+  const _RunningAgentCard();
+  @override
+  Widget build(BuildContext context) => Align(
+    alignment: Alignment.centerLeft,
+    child: Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox.square(
+              dimension: 18,
+              child: CircularProgressIndicator(strokeWidth: 2.2),
+            ),
+            const SizedBox(width: 12),
+            const Text('Agent sedang berpikir…'),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class MessageCard extends StatelessWidget {
@@ -747,7 +1199,7 @@ class _TasksPageState extends State<TasksPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Live work executed by Hermes PC. This phone never runs commands.',
+            'Agent work runs on your PC. This phone only controls and monitors tasks.',
             style: TextStyle(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -764,13 +1216,30 @@ class _TasksPageState extends State<TasksPage> {
           ...c.tasks.map(
             (task) => Card(
               child: ListTile(
-                leading: const SizedBox.square(
-                  dimension: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2.5),
-                ),
+                onTap: task.sessionId.isEmpty ? null : () => c.openTask(task),
+                leading: task.status == 'running'
+                    ? const SizedBox.square(
+                        dimension: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2.5),
+                      )
+                    : Icon(
+                        task.status == 'completed'
+                            ? Icons.check_circle_outline
+                            : task.status == 'stopped'
+                            ? Icons.stop_circle_outlined
+                            : Icons.error_outline,
+                      ),
                 title: Text(task.title),
-                subtitle: Text(task.status),
-                trailing: const Icon(Icons.computer),
+                subtitle: Text(
+                  [
+                    task.agents.join(' + '),
+                    task.detail,
+                    task.workspace,
+                  ].where((value) => value.isNotEmpty).join('\n'),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: Chip(label: Text(task.status)),
               ),
             ),
           ),
@@ -785,31 +1254,193 @@ class FilesPage extends StatelessWidget {
   final AppController c;
   @override
   Widget build(BuildContext context) {
-    final files = c.sessions
-        .expand(
-          (s) => s.messages.expand((m) => m.attachments).map((a) => (s, a)),
-        )
-        .toList();
+    final statuses = {for (final item in c.gitStatus) item.path: item.status};
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text('Files', style: Theme.of(context).textTheme.headlineSmall),
-        if (files.isEmpty)
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Workspace files',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+            ),
+            IconButton(
+              onPressed: c.reloadWorkspaceData,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        Text(c.workspacePath ?? 'Folder kerja PC belum terhubung'),
+        if (c.gitRepository.isGitRepository)
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 12),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      _GithubAvatar(c.gitRepository, radius: 22),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              c.gitRepository.githubRepository.isEmpty
+                                  ? 'Git repository'
+                                  : '${c.gitRepository.githubOwner}/${c.gitRepository.githubRepository}',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            Text('Branch: ${c.gitRepository.branch}'),
+                          ],
+                        ),
+                      ),
+                      IconButton.filledTonal(
+                        tooltip: 'Fetch perubahan GitHub',
+                        onPressed: c.syncGitHub,
+                        icon: const Icon(Icons.sync),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      Chip(
+                        avatar: const Icon(Icons.upload, size: 18),
+                        label: Text('${c.gitRepository.ahead} keluar'),
+                      ),
+                      Chip(
+                        avatar: const Icon(Icons.download, size: 18),
+                        label: Text('${c.gitRepository.behind} masuk'),
+                      ),
+                    ],
+                  ),
+                  if (c.gitRepository.outgoing.isNotEmpty)
+                    _CommitSection(
+                      title: 'Perubahan keluar',
+                      commits: c.gitRepository.outgoing,
+                      icon: Icons.north_east,
+                    ),
+                  if (c.gitRepository.incoming.isNotEmpty)
+                    _CommitSection(
+                      title: 'Perubahan masuk',
+                      commits: c.gitRepository.incoming,
+                      icon: Icons.south_west,
+                    ),
+                ],
+              ),
+            ),
+          )
+        else
+          const Card(
+            child: ListTile(
+              leading: Icon(Icons.cloud_off_outlined),
+              title: Text('Folder ini tidak terhubung ke Git repository'),
+              subtitle: Text(
+                'Session tetap tersimpan khusus untuk folder ini.',
+              ),
+            ),
+          ),
+        if (c.workspaceFolder.isNotEmpty)
+          TextButton.icon(
+            onPressed: () => c.openWorkspaceFolder(''),
+            icon: const Icon(Icons.arrow_upward),
+            label: const Text('Workspace root'),
+          ),
+        if (c.workspaceEntries.isEmpty)
           const ListTile(
             leading: Icon(Icons.folder_open),
-            title: Text('No local attachments'),
+            title: Text('No workspace files loaded'),
           ),
-        ...files.map(
-          (x) => ListTile(
-            onTap: () => c.open(x.$1),
-            leading: const Icon(Icons.insert_drive_file),
-            title: Text(x.$2.originalName),
-            subtitle: Text(x.$1.title),
+        ...c.workspaceEntries.map((entry) {
+          final status = statuses[entry.path];
+          return ListTile(
+            onTap: entry.isDirectory
+                ? () => c.openWorkspaceFolder(entry.path)
+                : null,
+            leading: Icon(
+              entry.isDirectory
+                  ? Icons.folder_outlined
+                  : Icons.insert_drive_file_outlined,
+            ),
+            title: Text(entry.name),
+            trailing: status == null ? null : Chip(label: Text(status.name)),
+          );
+        }),
+        if (c.gitStatus.isNotEmpty) ...[
+          const Divider(),
+          Text(
+            'Git changes (${c.gitStatus.length})',
+            style: Theme.of(context).textTheme.titleMedium,
           ),
-        ),
+          ...c.gitStatus
+              .where(
+                (item) =>
+                    !c.workspaceEntries.any((entry) => entry.path == item.path),
+              )
+              .map(
+                (item) => ListTile(
+                  leading: const Icon(Icons.change_history),
+                  title: Text(item.path),
+                  trailing: Chip(label: Text(item.status.name)),
+                ),
+              ),
+        ],
       ],
     );
   }
+}
+
+class _GithubAvatar extends StatelessWidget {
+  const _GithubAvatar(this.repository, {required this.radius});
+  final GitRepositoryStatus repository;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) => CircleAvatar(
+    radius: radius,
+    backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+    backgroundImage: repository.githubAvatarUrl.isEmpty
+        ? null
+        : NetworkImage(repository.githubAvatarUrl),
+    child: repository.githubAvatarUrl.isEmpty
+        ? const Icon(Icons.person_outline)
+        : null,
+  );
+}
+
+class _CommitSection extends StatelessWidget {
+  const _CommitSection({
+    required this.title,
+    required this.commits,
+    required this.icon,
+  });
+  final String title;
+  final List<GitCommit> commits;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => ExpansionTile(
+    tilePadding: EdgeInsets.zero,
+    leading: Icon(icon),
+    title: Text(title),
+    children: commits
+        .map(
+          (commit) => ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.only(left: 12),
+            leading: Text(commit.hash),
+            title: Text(commit.subject),
+            subtitle: Text(commit.author),
+          ),
+        )
+        .toList(),
+  );
 }
 
 class SettingsPage extends StatelessWidget {
@@ -848,9 +1479,7 @@ class SettingsPage extends StatelessWidget {
       ),
       const ListTile(
         title: Text('About'),
-        subtitle: Text(
-          'Hermes Remote 0.2.0\ncom.monokotil.hermesremote\nDemo Mode',
-        ),
+        subtitle: Text('Agent Remote 0.3.0\nMulti-agent PC controller'),
       ),
     ],
   );
@@ -862,7 +1491,7 @@ class ConnectionSettingsScreen extends StatelessWidget {
   final AppController app;
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Gateway Connection')),
+    appBar: AppBar(title: const Text('Koneksi Agent Remote')),
     body: ListenableBuilder(
       listenable: controller,
       builder: (context, _) => ListView(
@@ -1031,14 +1660,7 @@ Future<void> connectGateway(
                     GatewayCredentials(username.text.trim(), password.text),
                   );
                   await app.connect(
-                    HermesGatewayConnector(
-                      HermesGatewayConfig(
-                        baseUrl: Uri.parse(endpoint),
-                        provider: 'basic',
-                        username: username.text.trim(),
-                        password: password.text,
-                      ),
-                    ),
+                    HermesRemoteConnector(Uri.parse(endpoint), password.text),
                   );
                   if (!app.isDemo) {
                     await app.loadWorkspaces(

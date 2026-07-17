@@ -11,6 +11,7 @@ class AppController extends ChangeNotifier {
   final sessions = <AgentSession>[];
   StreamSubscription<AgentEvent>? _sub;
   Timer? _taskTimer;
+  Timer? _saveTimer;
   String? currentId;
   ThemeModeChoice theme = ThemeModeChoice.system;
   int page = 0;
@@ -21,7 +22,12 @@ class AppController extends ChangeNotifier {
   bool _connectedNotice = false;
   bool loadingSession = false;
   List<AgentWorkspace> workspaces = const [];
+  List<AgentProject> projects = const [];
   List<AgentTask> tasks = const [];
+  List<GitStatusEntry> gitStatus = const [];
+  GitRepositoryStatus gitRepository = const GitRepositoryStatus();
+  List<WorkspaceEntry> workspaceEntries = const [];
+  String workspaceFolder = '';
   String? workspacePath;
   bool get isDemo => connector is DemoAgentConnector;
   String get connectorLabel => connected ? 'PC connected' : 'Disconnected';
@@ -123,11 +129,26 @@ class AppController extends ChangeNotifier {
     );
     await _save();
     notifyListeners();
-    await connector.sendPrompt(
-      sessionId: s.id,
-      text: text.trim(),
-      attachments: attachments,
-    );
+    try {
+      await connector.sendPrompt(
+        sessionId: s.id,
+        text: text.trim(),
+        attachments: attachments,
+      );
+    } catch (error) {
+      connectorError = _connectionError(error);
+      final currentSession = current;
+      if (currentSession != null) {
+        _replace(
+          currentSession.copyWith(
+            status: SessionStatus.failed,
+            updatedAt: DateTime.now(),
+          ),
+        );
+      }
+      await _save();
+      notifyListeners();
+    }
   }
 
   void _event(AgentEvent e) {
@@ -353,7 +374,15 @@ class AppController extends ChangeNotifier {
         updatedAt: DateTime.now(),
       ),
     );
-    _save();
+    if (e.type == AgentEventType.messageCompleted ||
+        e.type == AgentEventType.messageFailed ||
+        e.type == AgentEventType.generationStopped) {
+      _saveTimer?.cancel();
+      _save();
+    } else {
+      _saveTimer?.cancel();
+      _saveTimer = Timer(const Duration(milliseconds: 350), _save);
+    }
     notifyListeners();
   }
 
@@ -415,19 +444,78 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> reloadProjects() async {
+    if (connector case final WorkspaceCatalog catalog) {
+      projects = await catalog.listProjects(limit: 20);
+      notifyListeners();
+    }
+  }
+
   Future<void> loadWorkspaces([String? preferred]) async {
     workspaces = await connector.listWorkspaces();
     final selected =
-        workspaces.where((x) => x.path == preferred).firstOrNull ??
         workspaces.where((x) => x.isActive).firstOrNull ??
+        workspaces.where((x) => x.path == preferred).firstOrNull ??
         workspaces.firstOrNull;
     if (selected != null) await selectWorkspace(selected.path);
   }
 
   Future<void> selectWorkspace(String path) async {
+    if (connector case final WorkspaceCatalog catalog) {
+      final selected = await catalog.activateWorkspace(path);
+      path = selected.path;
+      workspaces = await connector.listWorkspaces();
+    }
     connector.selectWorkspace(path);
     workspacePath = path;
+    workspaceFolder = '';
     await reloadSessions();
+    await reloadProjects();
+    await reloadWorkspaceData();
+  }
+
+  Future<void> openProjectSession(
+    AgentProject project,
+    AgentSession session,
+  ) async {
+    if (workspacePath != project.workspace.path) {
+      await selectWorkspace(project.workspace.path);
+    }
+    final loaded = sessions.where((item) => item.id == session.id).firstOrNull;
+    if (loaded != null) await open(loaded);
+  }
+
+  Future<void> reloadWorkspaceData({bool fetchGit = false}) async {
+    if (connector case final WorkspaceMonitor monitor) {
+      final results = await Future.wait([
+        monitor.getGitStatus(fetch: fetchGit),
+        monitor.getGitRepositoryStatus(fetch: false),
+        monitor.listWorkspace(workspaceFolder),
+      ]);
+      gitStatus = results[0] as List<GitStatusEntry>;
+      gitRepository = results[1] as GitRepositoryStatus;
+      workspaceEntries = results[2] as List<WorkspaceEntry>;
+      notifyListeners();
+    }
+  }
+
+  Future<void> syncGitHub() => reloadWorkspaceData(fetchGit: true);
+
+  Future<void> openWorkspaceFolder(String path) async {
+    workspaceFolder = path;
+    await reloadWorkspaceData();
+  }
+
+  Future<void> openTask(AgentTask task) async {
+    if (task.sessionId.isEmpty) return;
+    var session = sessions
+        .where((item) => item.id == task.sessionId)
+        .firstOrNull;
+    if (session == null) {
+      await reloadSessions();
+      session = sessions.where((item) => item.id == task.sessionId).firstOrNull;
+    }
+    if (session != null) await open(session);
   }
 
   Future<void> open(AgentSession s) async {
@@ -441,6 +529,12 @@ class AppController extends ChangeNotifier {
     } finally {
       loadingSession = false;
     }
+    notifyListeners();
+  }
+
+  Future<void> closeCurrentSession() async {
+    currentId = null;
+    await reloadProjects();
     notifyListeners();
   }
 
@@ -473,6 +567,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _taskTimer?.cancel();
+    _saveTimer?.cancel();
     _sub?.cancel();
     connector.dispose();
     super.dispose();

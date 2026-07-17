@@ -1,5 +1,23 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_remote/agent_connector.dart';
+import 'package:hermes_remote/app_controller.dart';
+import 'package:hermes_remote/local_store.dart';
+
+class _WorkspaceConnector extends DemoAgentConnector {
+  String? selected;
+
+  @override
+  Future<List<AgentWorkspace>> listWorkspaces() async => const [
+    AgentWorkspace(id: 'all', name: 'All Workspaces', path: 'all'),
+    AgentWorkspace(id: 'old', name: 'Old', path: 'old'),
+    AgentWorkspace(id: 'pc', name: 'PC', path: 'pc', isActive: true),
+  ];
+
+  @override
+  void selectWorkspace(String path) => selected = path;
+}
 
 void main() {
   test('demo streams and completes simple response', () async {
@@ -39,5 +57,16 @@ void main() {
     await c.initialize();
     await c.renameSession('loaded-after-restart', 'Renamed');
     await c.dispose();
+  });
+  test('active PC workspace overrides stale mobile selection', () async {
+    final connector = _WorkspaceConnector();
+    final controller = AppController(
+      connector,
+      LocalStore(directory: await Directory.systemTemp.createTemp()),
+    );
+    await controller.loadWorkspaces('old');
+    expect(controller.workspacePath, 'pc');
+    expect(connector.selected, 'pc');
+    controller.dispose();
   });
 }

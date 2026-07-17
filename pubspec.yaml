@@ -1,7 +1,7 @@
 name: hermes_remote
-description: "App-first Flutter Android client for Hermes Agent."
+description: "Mobile controller for local and remote PC agent runtimes."
 publish_to: 'none'
-version: 0.2.0+1
+version: 0.3.0+2
 
 environment:
   sdk: ^3.12.2

@@ -1,4 +1,10 @@
 import importlib.util
+import json
+import sqlite3
+import threading
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 MODULE = Path(__file__).parents[1] / "tools" / "hermes_remote_server.py"
@@ -17,6 +23,178 @@ def test_parse_git_status_maps_core_states():
     ]
 
 
+def test_provider_usage_reads_9router_metrics_without_secrets(tmp_path):
+    database = tmp_path / "data.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE usageHistory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            connectionId TEXT,
+            apiKey TEXT,
+            endpoint TEXT,
+            promptTokens INTEGER DEFAULT 0,
+            completionTokens INTEGER DEFAULT 0,
+            cost REAL DEFAULT 0,
+            status TEXT,
+            tokens TEXT,
+            meta TEXT
+        )
+        """
+    )
+    connection.executemany(
+        """
+        INSERT INTO usageHistory (
+            timestamp, provider, model, endpoint, promptTokens,
+            completionTokens, cost, status, tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "2026-07-18T12:00:00Z",
+                "codex",
+                "gpt-5.6-sol",
+                "/v1/responses",
+                100,
+                20,
+                0.25,
+                "ok",
+                json.dumps({"cached_tokens": 80}),
+            ),
+            (
+                "2026-07-18T11:00:00Z",
+                "claude",
+                "opus",
+                "/v1/messages",
+                40,
+                10,
+                0.1,
+                "ok",
+                json.dumps({"cached_tokens": 5}),
+            ),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    usage = remote_server.provider_usage(
+        range_name="24h",
+        provider="codex",
+        db_path=database,
+        now=datetime(2026, 7, 18, 13, tzinfo=timezone.utc),
+    )
+
+    assert usage["available"] is True
+    assert usage["summary"] == {
+        "requests": 1,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cached_tokens": 80,
+        "estimated_cost": 0.25,
+    }
+    assert usage["active"]["model"] == "gpt-5.6-sol"
+    assert usage["models"] == ["gpt-5.6-sol", "opus"]
+    assert "apiKey" not in usage["recent"][0]
+    assert "connectionId" not in usage["recent"][0]
+
+
+def test_provider_usage_filters_agent_remote_mobile_key(tmp_path):
+    database = tmp_path / 'data.sqlite'
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        '''
+        CREATE TABLE apiKeys (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
+            name TEXT,
+            machineId TEXT,
+            isActive INTEGER DEFAULT 1,
+            createdAt TEXT NOT NULL
+        );
+        CREATE TABLE usageHistory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            connectionId TEXT,
+            apiKey TEXT,
+            endpoint TEXT,
+            promptTokens INTEGER DEFAULT 0,
+            completionTokens INTEGER DEFAULT 0,
+            cost REAL DEFAULT 0,
+            status TEXT,
+            tokens TEXT,
+            meta TEXT
+        );
+        '''
+    )
+    connection.execute(
+        'INSERT INTO apiKeys VALUES (?, ?, ?, ?, ?, ?)',
+        ('mobile', 'sk-mobile', 'Agent Remote Mobile', 'machine', 1, '2026-07-18'),
+    )
+    connection.executemany(
+        '''
+        INSERT INTO usageHistory (
+            timestamp, provider, model, apiKey, endpoint,
+            promptTokens, completionTokens, cost, status, tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        [
+            (
+                '2026-07-18T12:00:00Z',
+                'codex',
+                'mobile-model',
+                'sk-mobile',
+                '/v1/responses',
+                100,
+                20,
+                0.25,
+                'ok',
+                '{}',
+            ),
+            (
+                '2026-07-18T12:30:00Z',
+                'codex',
+                'desktop-model',
+                'sk-desktop',
+                '/v1/responses',
+                900,
+                80,
+                1.0,
+                'ok',
+                '{}',
+            ),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    usage = remote_server.provider_usage(
+        range_name='24h',
+        scope='mobile',
+        db_path=database,
+        now=datetime(2026, 7, 18, 13, tzinfo=timezone.utc),
+    )
+
+    assert usage['mobile_filter_available'] is True
+    assert usage['attribution'] == 'agent_remote_mobile_key'
+    assert usage['summary']['requests'] == 1
+    assert usage['summary']['input_tokens'] == 100
+    assert usage['recent'][0]['model'] == 'mobile-model'
+    assert 'apiKey' not in usage['recent'][0]
+
+
+def test_agent_environment_uses_mobile_key_only_for_codex(monkeypatch):
+    monkeypatch.setenv('AGENT_REMOTE_9ROUTER_MOBILE_KEY', 'sk-mobile')
+    assert remote_server.agent_environment('codex') == {
+        'NINE_ROUTER_API_KEY': 'sk-mobile'
+    }
+    assert remote_server.agent_environment('claude') == {}
+
+
 def test_resolve_child_rejects_workspace_escape(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -27,6 +205,49 @@ def test_resolve_child_rejects_workspace_escape(tmp_path):
         pass
     else:
         raise AssertionError("workspace escape accepted")
+
+
+def test_workspace_file_preview_and_atomic_save_with_conflict_guard(tmp_path):
+    path = tmp_path / 'main.py'
+    path.write_bytes(b'print(1)\n')
+
+    preview = remote_server.workspace_file(tmp_path, 'main.py')
+    assert preview['content'] == 'print(1)\n'
+    assert preview['editable'] is True
+    assert preview['line_count'] == 2
+
+    saved = remote_server.save_workspace_file(
+        tmp_path,
+        'main.py',
+        'print(2)\n',
+        preview['hash'],
+    )
+    assert path.read_bytes() == b'print(2)\n'
+    assert saved['hash'] != preview['hash']
+
+    path.write_bytes(b'print(3)\n')
+    try:
+        remote_server.save_workspace_file(
+            tmp_path,
+            'main.py',
+            'print(4)\n',
+            saved['hash'],
+        )
+    except remote_server.FileConflictError:
+        pass
+    else:
+        raise AssertionError('stale mobile edit overwrote newer PC file')
+
+
+def test_workspace_file_rejects_binary_and_path_escape(tmp_path):
+    (tmp_path / 'binary.bin').write_bytes(b'abc\x00def')
+    for relative in ('binary.bin', '../outside.txt'):
+        try:
+            remote_server.workspace_file(tmp_path, relative)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'unsafe file accepted: {relative}')
 
 
 def test_save_attachments_keeps_uploads_inside_workspace(tmp_path):
@@ -121,6 +342,20 @@ def test_codex_tool_events_are_normalized():
     assert completed[0]["output"] == "clean"
 
 
+def test_codex_json_scalar_output_does_not_crash_event_stream():
+    events = remote_server.normalize_codex_event(
+        '"plain JSON string from command output"',
+        'codex',
+    )
+    assert events == [{
+        'type': 'delta',
+        'agent_id': 'codex',
+        'text': 'plain JSON string from command output\n',
+        'task_text': 'plain JSON string from command output',
+        'phase': 'responding',
+    }]
+
+
 def test_completed_reasoning_does_not_claim_task_is_finished():
     events = remote_server.normalize_codex_event(
         '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning"}}',
@@ -169,6 +404,102 @@ def test_completed_task_reports_frozen_elapsed_seconds(tmp_path):
         "updatedAt": "2026-07-17T01:02:03+00:00",
     }
     assert runtime.list_tasks()[0]["elapsedSeconds"] == 3723
+
+
+def test_agent_states_track_agents_independently(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    runtime = remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+    runtime.tasks["run-1"] = {
+        "id": "run-1",
+        "status": "running",
+        "createdAt": "2026-07-17T00:00:00+00:00",
+        "updatedAt": "2026-07-17T00:00:00+00:00",
+        "agentStates": [],
+    }
+    runtime._update_agent_state(
+        "run-1", "codex", status="running", phase="testing", detail="flutter test"
+    )
+    runtime._update_agent_state(
+        "run-1", "claude", status="running", phase="editing", detail="Editing API"
+    )
+    states = {state["id"]: state for state in runtime.list_tasks()[0]["agentStates"]}
+    assert states["codex"]["phase"] == "testing"
+    assert states["claude"]["phase"] == "editing"
+    assert states["codex"]["detail"] == "flutter test"
+    assert states["claude"]["detail"] == "Editing API"
+
+
+def test_stop_marks_all_pending_agent_states(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    session = store.create()
+    runtime = remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+    runtime.session_runs[session["id"]] = "run-1"
+    runtime.tasks["run-1"] = {
+        "id": "run-1",
+        "status": "running",
+        "createdAt": "2026-07-17T00:00:00+00:00",
+        "updatedAt": "2026-07-17T00:00:00+00:00",
+        "agentStates": [
+            {"id": "codex", "status": "running"},
+            {"id": "claude", "status": "queued"},
+        ],
+    }
+    assert runtime.stop_session(session["id"]) is True
+    states = runtime.tasks["run-1"]["agentStates"]
+    assert {state["status"] for state in states} == {"stopped"}
+    assert {state["phase"] for state in states} == {"stopped"}
+
+
+def test_generic_output_phase_uses_local_heuristics_only():
+    assert remote_server.infer_activity_phase("Running flutter test") == "testing"
+    assert remote_server.infer_activity_phase("apply_patch lib/main.dart") == "editing"
+    assert remote_server.infer_activity_phase("git status --short") == "running_command"
+
+
+def test_coordinator_tracks_roles_without_extra_agent_processes(monkeypatch, tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    session = store.create()
+    commands = []
+
+    class FakeProcess:
+        next_pid = 100
+
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.stdout = iter(["Working on assigned task\n"])
+
+        def wait(self, timeout):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(remote_server.subprocess, "Popen", FakeProcess)
+    runtime = remote_server.AgentRuntime(
+        store,
+        lambda agent_id, *_: [agent_id],
+        tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_git_changed_state", lambda *_: {})
+    runtime.execute(
+        session["id"],
+        "Inspect project",
+        "",
+        ["codex", "claude"],
+        "coordinator",
+        "codex",
+        [],
+        "workspace",
+        remote_server.queue.Queue(),
+    )
+    task = runtime.list_tasks()[0]
+    states = {state["id"]: state for state in task["agentStates"]}
+    assert len(commands) == 2
+    assert states["codex"]["role"] == "coordinator"
+    assert states["claude"]["role"] == "worker"
+    assert {state["status"] for state in states.values()} == {"completed"}
 
 
 def test_codex_completion_event_becomes_persistent_external_task(monkeypatch, tmp_path):
@@ -244,3 +575,159 @@ def test_stop_marks_session_before_process_registration(tmp_path):
     runtime.session_runs[session["id"]] = "run-1"
     assert runtime.stop_session(session["id"]) is True
     assert store.get(session["id"])["status"] == "stopped"
+
+
+def test_security_audit_throttles_and_strips_query_secrets(monkeypatch, tmp_path):
+    audit = tmp_path / "security_audit.jsonl"
+    backup = tmp_path / "security_audit.jsonl.1"
+    monkeypatch.setattr(remote_server, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(remote_server, "SECURITY_AUDIT_FILE", audit)
+    monkeypatch.setattr(remote_server, "SECURITY_AUDIT_BACKUP_FILE", backup)
+    remote_server.SECURITY_AUDIT_LAST.clear()
+
+    assert remote_server.record_security_audit(
+        "100.64.0.5",
+        True,
+        "get",
+        "/api/status?token=super-secret",
+        "AgentRemote/0.3.0\nInjected",
+        current_time=100,
+    )
+    assert not remote_server.record_security_audit(
+        "100.64.0.5",
+        True,
+        "GET",
+        "/api/tasks",
+        current_time=101,
+    )
+    assert remote_server.record_security_audit(
+        "192.168.1.9",
+        False,
+        "POST",
+        "/api/sessions",
+        current_time=100,
+    )
+    assert not remote_server.record_security_audit(
+        "192.168.1.9",
+        False,
+        "POST",
+        "/api/sessions",
+        current_time=105,
+    )
+    assert remote_server.record_security_audit(
+        "192.168.1.9",
+        False,
+        "POST",
+        "/api/sessions",
+        current_time=111,
+    )
+
+    rows = remote_server.security_audit_rows()
+    assert len(rows) == 3
+    assert rows[-1]["ip_address"] == "100.64.0.5"
+    assert rows[-1]["path"] == "/api/status"
+    stored = audit.read_text(encoding="utf-8")
+    assert "super-secret" not in stored
+    assert "Authorization" not in stored
+    assert "\nInjected" not in stored
+
+
+def test_security_audit_rotates_without_losing_recent_rows(monkeypatch, tmp_path):
+    audit = tmp_path / "security_audit.jsonl"
+    backup = tmp_path / "security_audit.jsonl.1"
+    monkeypatch.setattr(remote_server, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(remote_server, "SECURITY_AUDIT_FILE", audit)
+    monkeypatch.setattr(remote_server, "SECURITY_AUDIT_BACKUP_FILE", backup)
+    monkeypatch.setattr(remote_server, "SECURITY_AUDIT_MAX_BYTES", 1)
+    remote_server.SECURITY_AUDIT_LAST.clear()
+
+    assert remote_server.record_security_audit(
+        "100.64.0.5", True, "GET", "/api/status", current_time=100
+    )
+    assert remote_server.record_security_audit(
+        "100.64.0.6", True, "GET", "/api/status", current_time=101
+    )
+
+    assert backup.exists()
+    assert [row["ip_address"] for row in remote_server.security_audit_rows()] == [
+        "100.64.0.6",
+        "100.64.0.5",
+    ]
+
+
+def test_handler_authorization_audits_direct_peer_ip(monkeypatch):
+    calls = []
+    monkeypatch.setattr(remote_server, "TOKEN", "strong-test-token")
+    monkeypatch.setattr(
+        remote_server,
+        "record_security_audit",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    handler = object.__new__(remote_server.Handler)
+    handler.client_address = ("100.64.0.8", 4242)
+    handler.command = "GET"
+    handler.path = "/api/status?ignored=1"
+    handler.headers = {
+        "Authorization": "Bearer strong-test-token",
+        "User-Agent": "AgentRemote/0.3.0",
+        "X-Forwarded-For": "203.0.113.99",
+    }
+
+    assert handler._authorized() is True
+    assert calls[0][0] == (
+        "100.64.0.8",
+        True,
+        "GET",
+        "/api/status?ignored=1",
+        "AgentRemote/0.3.0",
+    )
+
+
+def test_security_audit_endpoint_reports_success_and_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_server, "TOKEN", "strong-test-token")
+    monkeypatch.setattr(remote_server, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        remote_server, "SECURITY_AUDIT_FILE", tmp_path / "security_audit.jsonl"
+    )
+    monkeypatch.setattr(
+        remote_server,
+        "SECURITY_AUDIT_BACKUP_FILE",
+        tmp_path / "security_audit.jsonl.1",
+    )
+    remote_server.SECURITY_AUDIT_LAST.clear()
+    server = remote_server.ThreadingHTTPServer(("127.0.0.1", 0), remote_server.Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}/api/security/audit"
+    try:
+        rejected = urllib.request.Request(
+            endpoint,
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        try:
+            urllib.request.urlopen(rejected, timeout=2)
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError("invalid token was accepted")
+
+        accepted = urllib.request.Request(
+            endpoint,
+            headers={
+                "Authorization": "Bearer strong-test-token",
+                "User-Agent": "AgentRemote/0.3.0",
+            },
+        )
+        with urllib.request.urlopen(accepted, timeout=2) as response:
+            payload = json.loads(response.read())
+        assert {entry["event"] for entry in payload["entries"]} == {
+            "access_granted",
+            "access_denied",
+        }
+        assert {entry["ip_address"] for entry in payload["entries"]} == {
+            "127.0.0.1"
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)

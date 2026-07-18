@@ -23,6 +23,28 @@ abstract interface class WorkspaceCatalog {
   Future<AgentWorkspace> activateWorkspace(String path);
 }
 
+class AgentTaskAgentState {
+  const AgentTaskAgentState({
+    required this.id,
+    required this.name,
+    required this.status,
+    required this.phase,
+    required this.detail,
+    this.role = 'agent',
+    this.elapsedSeconds = 0,
+    this.idleSeconds = 0,
+    this.startedAt,
+    this.updatedAt,
+    this.completedAt,
+  });
+
+  final String id, name, status, phase, detail, role;
+  final int elapsedSeconds, idleSeconds;
+  final DateTime? startedAt, updatedAt, completedAt;
+
+  bool get isActive => status == 'running' || status == 'queued';
+}
+
 class AgentTask {
   const AgentTask({
     required this.id,
@@ -31,6 +53,9 @@ class AgentTask {
     this.sessionId = '',
     this.detail = '',
     this.agents = const [],
+    this.agentStates = const [],
+    this.activeAgent = '',
+    this.mode = 'single',
     this.workspace = '',
     this.permission = '',
     this.source = 'agent_remote',
@@ -38,18 +63,36 @@ class AgentTask {
     this.idleSeconds = 0,
     this.createdAt,
     this.updatedAt,
+    this.changedFiles = 0,
   });
   final String id,
       title,
       status,
       sessionId,
       detail,
+      activeAgent,
+      mode,
       workspace,
       permission,
       source;
   final List<String> agents;
+  final List<AgentTaskAgentState> agentStates;
   final int elapsedSeconds, idleSeconds;
+  final int changedFiles;
   final DateTime? createdAt, updatedAt;
+
+  AgentTaskAgentState? get activeAgentState {
+    for (final state in agentStates) {
+      if (state.id == activeAgent && state.isActive) return state;
+    }
+    for (final state in agentStates) {
+      if (state.status == 'running') return state;
+    }
+    for (final state in agentStates) {
+      if (state.status == 'queued') return state;
+    }
+    return agentStates.firstOrNull;
+  }
 }
 
 enum GitFileStatus { added, modified, deleted, untracked }
@@ -76,6 +119,12 @@ class GitRepositoryStatus {
     this.remoteUrl = '',
     this.ahead = 0,
     this.behind = 0,
+    this.upstream = '',
+    this.additions = 0,
+    this.deletions = 0,
+    this.githubCliInstalled = false,
+    this.githubCliAuthenticated = false,
+    this.githubCliUser = '',
     this.githubOwner = '',
     this.githubRepository = '',
     this.githubAvatarUrl = '',
@@ -83,19 +132,102 @@ class GitRepositoryStatus {
     this.outgoing = const [],
   });
   final bool isGitRepository;
+  final bool githubCliInstalled, githubCliAuthenticated;
   final String branch,
       remoteUrl,
+      upstream,
       githubOwner,
       githubRepository,
-      githubAvatarUrl;
-  final int ahead, behind;
+      githubAvatarUrl,
+      githubCliUser;
+  final int ahead, behind, additions, deletions;
   final List<GitCommit> incoming, outgoing;
+}
+
+class ProviderUsageSummary {
+  const ProviderUsageSummary({
+    this.requests = 0,
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cachedTokens = 0,
+    this.estimatedCost = 0,
+  });
+  final int requests, inputTokens, outputTokens, cachedTokens;
+  final double estimatedCost;
+}
+
+class ProviderUsageEntry {
+  const ProviderUsageEntry({
+    required this.timestamp,
+    required this.provider,
+    required this.model,
+    required this.endpoint,
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.cachedTokens,
+    required this.cost,
+    required this.status,
+    this.isActive = false,
+  });
+  final DateTime timestamp;
+  final String provider, model, endpoint, status;
+  final int inputTokens, outputTokens, cachedTokens;
+  final double cost;
+  final bool isActive;
+}
+
+class ProviderUsageSnapshot {
+  const ProviderUsageSnapshot({
+    required this.available,
+    required this.source,
+    required this.range,
+    required this.summary,
+    required this.providers,
+    required this.models,
+    required this.recent,
+    required this.attribution,
+    this.active,
+    this.reason = '',
+    this.scope = 'all',
+    this.mobileFilterAvailable = false,
+    this.mobileKeyName = '',
+    this.updatedAt,
+  });
+  final bool available;
+  final String source, range, attribution, reason, scope, mobileKeyName;
+  final bool mobileFilterAvailable;
+  final ProviderUsageSummary summary;
+  final ProviderUsageEntry? active;
+  final List<String> providers, models;
+  final List<ProviderUsageEntry> recent;
+  final DateTime? updatedAt;
 }
 
 class WorkspaceEntry {
   const WorkspaceEntry(this.name, this.path, this.isDirectory);
   final String name, path;
   final bool isDirectory;
+}
+
+class WorkspaceFileDocument {
+  const WorkspaceFileDocument({
+    required this.path,
+    required this.name,
+    required this.content,
+    required this.diff,
+    required this.hash,
+    required this.size,
+    required this.lineCount,
+    required this.exists,
+    required this.editable,
+    required this.gitStatus,
+    required this.maxBytes,
+    this.modifiedAt,
+  });
+  final String path, name, content, diff, hash, gitStatus;
+  final int size, lineCount, maxBytes;
+  final bool exists, editable;
+  final DateTime? modifiedAt;
 }
 
 enum AgentEventType {
@@ -165,6 +297,55 @@ abstract interface class WorkspaceMonitor {
   Future<List<GitStatusEntry>> getGitStatus({bool fetch = false});
   Future<GitRepositoryStatus> getGitRepositoryStatus({bool fetch = false});
   Future<List<WorkspaceEntry>> listWorkspace(String path);
+}
+
+class SecurityAuditEntry {
+  const SecurityAuditEntry({
+    required this.timestamp,
+    required this.event,
+    required this.ipAddress,
+    required this.method,
+    required this.path,
+    required this.userAgent,
+  });
+  final DateTime timestamp;
+  final String event, ipAddress, method, path, userAgent;
+  bool get authorized => event == 'access_granted';
+}
+
+class SecurityAuditSnapshot {
+  const SecurityAuditSnapshot({
+    required this.entries,
+    required this.peerIpOnly,
+    required this.successWindowSeconds,
+    required this.failureWindowSeconds,
+  });
+  final List<SecurityAuditEntry> entries;
+  final bool peerIpOnly;
+  final int successWindowSeconds, failureWindowSeconds;
+}
+
+abstract interface class SecurityMonitor {
+  Future<SecurityAuditSnapshot> getSecurityAudit({int limit = 50});
+}
+
+abstract interface class ProviderUsageMonitor {
+  Future<ProviderUsageSnapshot> getProviderUsage({
+    String range = '24h',
+    String provider = '',
+    String model = '',
+    String scope = 'all',
+    int limit = 50,
+  });
+}
+
+abstract interface class WorkspaceFileEditor {
+  Future<WorkspaceFileDocument> getWorkspaceFile(String path);
+  Future<WorkspaceFileDocument> saveWorkspaceFile({
+    required String path,
+    required String content,
+    required String baseHash,
+  });
 }
 
 abstract class AgentConnector {

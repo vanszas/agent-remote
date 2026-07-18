@@ -1,14 +1,20 @@
 import base64
+import difflib
 import hashlib
 import json
 import os
 import queue
 import re
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import threading
+import tempfile
+import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +28,7 @@ from agent_runtime import (
     AgentRuntime,
     SessionStore,
     available_agents as discover_agents,
+    infer_activity_phase,
     normalize_codex_event,
     now_iso,
 )
@@ -36,11 +43,30 @@ STATE_ROOT = Path(
 STATE_FILE = STATE_ROOT / "server.json"
 BRIDGE_FILE = STATE_ROOT / "bridge.json"
 CODEX_TASKS_FILE = STATE_ROOT / "codex_tasks.json"
+SECURITY_AUDIT_FILE = STATE_ROOT / "security_audit.jsonl"
+SECURITY_AUDIT_BACKUP_FILE = STATE_ROOT / "security_audit.jsonl.1"
+SECURITY_AUDIT_MAX_BYTES = 2 * 1024 * 1024
+NINE_ROUTER_DB = Path(
+    os.environ.get(
+        "AGENT_REMOTE_9ROUTER_DB",
+        Path(os.environ.get("APPDATA", Path.home())) / "9router" / "db" / "data.sqlite",
+    )
+)
+MAX_TEXT_FILE_BYTES = 512 * 1024
+MOBILE_KEY_NAME = os.environ.get(
+    'AGENT_REMOTE_9ROUTER_MOBILE_KEY_NAME', 'Agent Remote Mobile'
+)
+AUTH_SUCCESS_LOG_WINDOW_SECONDS = 15 * 60
+AUTH_FAILURE_LOG_WINDOW_SECONDS = 10
 HERMES = Path(r"C:\Users\ADMIN\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe")
 TOKEN = os.environ.get("AGENT_REMOTE_TOKEN") or os.environ.get(
     "HERMES_REMOTE_TOKEN", "admin"
 )
 SKIP = {".git", ".dart_tool", "build", ".idea", ".vs", ".hermes-remote"}
+
+
+class FileConflictError(Exception):
+    pass
 
 
 def load_server_state() -> dict:
@@ -82,6 +108,8 @@ def load_codex_tasks() -> list[dict]:
 
 CODEX_TASKS_LOCK = threading.RLock()
 CODEX_TASKS = load_codex_tasks()
+SECURITY_AUDIT_LOCK = threading.RLock()
+SECURITY_AUDIT_LAST: dict[tuple[str, str], float] = {}
 
 
 def save_codex_tasks():
@@ -92,6 +120,79 @@ def save_codex_tasks():
         encoding="utf-8",
     )
     temporary.replace(CODEX_TASKS_FILE)
+
+
+def _safe_audit_value(value: object, limit: int) -> str:
+    clean = "".join(
+        character if character.isprintable() and character not in "\r\n" else " "
+        for character in str(value or "")
+    )
+    return clean.strip()[:limit]
+
+
+def record_security_audit(
+    client_ip: str,
+    authorized: bool,
+    method: str,
+    request_path: str,
+    user_agent: str = "",
+    *,
+    current_time: float | None = None,
+) -> bool:
+    event = "access_granted" if authorized else "access_denied"
+    ip_address = _safe_audit_value(client_ip, 64) or "unknown"
+    now_value = time.monotonic() if current_time is None else current_time
+    window = (
+        AUTH_SUCCESS_LOG_WINDOW_SECONDS
+        if authorized
+        else AUTH_FAILURE_LOG_WINDOW_SECONDS
+    )
+    key = (event, ip_address)
+    with SECURITY_AUDIT_LOCK:
+        previous = SECURITY_AUDIT_LAST.get(key)
+        if previous is not None and now_value - previous < window:
+            return False
+        try:
+            STATE_ROOT.mkdir(parents=True, exist_ok=True)
+            if (
+                SECURITY_AUDIT_FILE.exists()
+                and SECURITY_AUDIT_FILE.stat().st_size >= SECURITY_AUDIT_MAX_BYTES
+            ):
+                SECURITY_AUDIT_BACKUP_FILE.unlink(missing_ok=True)
+                SECURITY_AUDIT_FILE.replace(SECURITY_AUDIT_BACKUP_FILE)
+            row = {
+                "timestamp": now_iso(),
+                "event": event,
+                "ip_address": ip_address,
+                "method": _safe_audit_value(method, 12).upper(),
+                "path": _safe_audit_value(urlparse(request_path).path, 180),
+                "user_agent": _safe_audit_value(user_agent, 180),
+            }
+            with SECURITY_AUDIT_FILE.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(row, ensure_ascii=False) + "\n")
+            SECURITY_AUDIT_LAST[key] = now_value
+            return True
+        except OSError:
+            return False
+
+
+def security_audit_rows(limit: int = 50) -> list[dict]:
+    bounded_limit = max(1, min(limit, 200))
+    rows: list[dict] = []
+    with SECURITY_AUDIT_LOCK:
+        for source in (SECURITY_AUDIT_BACKUP_FILE, SECURITY_AUDIT_FILE):
+            try:
+                lines = source.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    value = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(value, dict) and value.get("ip_address"):
+                    rows.append(value)
+    return rows[-bounded_limit:][::-1]
 
 
 def record_codex_event(payload: dict) -> dict:
@@ -209,6 +310,285 @@ def _commit_rows(raw: str) -> list[dict]:
     return commits
 
 
+def _git_line_changes(workspace: Path) -> tuple[int, int]:
+    result = _git(workspace, "diff", "--numstat", "HEAD")
+    if result.returncode != 0:
+        result = _git(workspace, "diff", "--numstat")
+    additions = deletions = 0
+    for row in result.stdout.splitlines():
+        parts = row.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        if parts[0].isdigit():
+            additions += int(parts[0])
+        if parts[1].isdigit():
+            deletions += int(parts[1])
+    return additions, deletions
+
+
+def github_cli_status() -> dict:
+    executable = shutil.which("gh")
+    if not executable:
+        return {"installed": False, "authenticated": False, "user": ""}
+    try:
+        result = subprocess.run(
+            [executable, "auth", "status", "--hostname", "github.com"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"installed": True, "authenticated": False, "user": ""}
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"account\s+([^\s(]+)", output, flags=re.IGNORECASE)
+    return {
+        "installed": True,
+        "authenticated": result.returncode == 0,
+        "user": match.group(1) if match else "",
+    }
+
+
+def _usage_cutoff(range_name: str, now: datetime) -> datetime:
+    if range_name == "today":
+        local_now = now.astimezone()
+        return local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+            timezone.utc
+        )
+    duration = {
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+        "60d": timedelta(days=60),
+    }.get(range_name)
+    if duration is None:
+        raise ValueError("invalid usage range")
+    return now - duration
+
+
+def _token_breakdown(raw: str | None) -> dict:
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def nine_router_mobile_key(db_path: Path | None = None) -> str:
+    configured = os.environ.get('AGENT_REMOTE_9ROUTER_MOBILE_KEY', '').strip()
+    if configured:
+        return configured
+    path = (db_path or NINE_ROUTER_DB).resolve()
+    if not path.is_file():
+        return ''
+    try:
+        connection = sqlite3.connect(
+            f'file:{path.as_posix()}?mode=ro',
+            uri=True,
+            timeout=2,
+        )
+        row = connection.execute(
+            '''
+            SELECT key
+            FROM apiKeys
+            WHERE name = ? AND isActive = 1
+            ORDER BY createdAt DESC
+            LIMIT 1
+            ''',
+            [MOBILE_KEY_NAME],
+        ).fetchone()
+        connection.close()
+    except sqlite3.Error:
+        return ''
+    return str(row[0]) if row and row[0] else ''
+
+
+def agent_environment(agent_id: str) -> dict[str, str]:
+    if agent_id != 'codex':
+        return {}
+    mobile_key = nine_router_mobile_key()
+    return {'NINE_ROUTER_API_KEY': mobile_key} if mobile_key else {}
+
+
+def provider_usage(
+    range_name: str = "24h",
+    provider: str = "",
+    model: str = "",
+    scope: str = 'all',
+    limit: int = 50,
+    db_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict:
+    path = (db_path or NINE_ROUTER_DB).resolve()
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = _usage_cutoff(range_name, now)
+    safe_limit = max(1, min(limit, 100))
+    if scope not in {'all', 'mobile'}:
+        raise ValueError('invalid usage scope')
+    mobile_key = nine_router_mobile_key(path)
+    mobile_filter_available = bool(mobile_key)
+    empty = {
+        "available": False,
+        "source": "9router",
+        "range": range_name,
+        "summary": {
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "estimated_cost": 0.0,
+        },
+        "active": None,
+        "providers": [],
+        "models": [],
+        "recent": [],
+        "attribution": "all_9router_requests_on_pc",
+    }
+    empty.update({
+        'scope': scope,
+        'mobile_filter_available': mobile_filter_available,
+        'mobile_key_name': MOBILE_KEY_NAME,
+        'attribution': (
+            'agent_remote_mobile_key'
+            if scope == 'mobile'
+            else 'all_9router_requests_on_pc'
+        ),
+    })
+    if not path.is_file():
+        return {**empty, "reason": "9Router database not found"}
+    clauses = ["timestamp >= ?"]
+    parameters: list[object] = [cutoff.isoformat().replace("+00:00", "Z")]
+    if scope == 'mobile':
+        if not mobile_key:
+            return {
+                **empty,
+                'available': True,
+                'reason': (
+                    f'Buat API key 9Router bernama {MOBILE_KEY_NAME} untuk '
+                    'memisahkan konsumsi task HP.'
+                ),
+                'updated_at': now_iso(),
+            }
+        clauses.append('apiKey = ?')
+        parameters.append(mobile_key)
+    filter_clauses = list(clauses)
+    filter_parameters = list(parameters)
+    if provider:
+        clauses.append("provider = ?")
+        parameters.append(provider)
+    if model:
+        clauses.append("model = ?")
+        parameters.append(model)
+    where = " AND ".join(clauses)
+    try:
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro",
+            uri=True,
+            timeout=2,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usageHistory'"
+        ).fetchone()
+        if table is None:
+            connection.close()
+            return {**empty, "reason": "9Router usage schema unavailable"}
+        summary_row = connection.execute(
+            f"""
+            SELECT COUNT(*) AS requests,
+                   COALESCE(SUM(promptTokens), 0) AS input_tokens,
+                   COALESCE(SUM(completionTokens), 0) AS output_tokens,
+                   COALESCE(SUM(cost), 0) AS estimated_cost,
+                   COALESCE(SUM(
+                       CASE WHEN json_valid(tokens)
+                            THEN CAST(json_extract(tokens, '$.cached_tokens') AS INTEGER)
+                            ELSE 0 END
+                   ), 0) AS cached_tokens
+            FROM usageHistory
+            WHERE {where}
+            """,
+            parameters,
+        ).fetchone()
+        rows = connection.execute(
+            f"""
+            SELECT timestamp, provider, model, endpoint, promptTokens,
+                   completionTokens, cost, status, tokens
+            FROM usageHistory
+            WHERE {where}
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            [*parameters, safe_limit],
+        ).fetchall()
+        filter_rows = connection.execute(
+            f"""
+            SELECT DISTINCT provider, model
+            FROM usageHistory
+            WHERE {' AND '.join(filter_clauses)}
+            ORDER BY provider, model
+            """,
+            filter_parameters,
+        ).fetchall()
+        connection.close()
+    except sqlite3.Error:
+        return {**empty, "reason": "9Router database is busy or unreadable"}
+    recent = []
+    for row in rows:
+        tokens = _token_breakdown(row["tokens"])
+        cached = int(tokens.get("cached_tokens") or 0)
+        prompt = int(row["promptTokens"] or 0)
+        completion = int(row["completionTokens"] or 0)
+        cost = float(row["cost"] or 0)
+        recent.append(
+            {
+                "timestamp": row["timestamp"],
+                "provider": row["provider"] or "unknown",
+                "model": row["model"] or "unknown",
+                "endpoint": row["endpoint"] or "",
+                "input_tokens": prompt,
+                "output_tokens": completion,
+                "cached_tokens": cached,
+                "cost": cost,
+                "status": row["status"] or "unknown",
+            }
+        )
+    active = recent[0] if recent else None
+    if active:
+        try:
+            timestamp = datetime.fromisoformat(active["timestamp"].replace("Z", "+00:00"))
+            active = {
+                **active,
+                "is_active": now - timestamp.astimezone(timezone.utc) <= timedelta(minutes=2),
+            }
+        except ValueError:
+            active = {**active, "is_active": False}
+    return {
+        "available": True,
+        "source": "9router",
+        "range": range_name,
+        "summary": {
+            "requests": int(summary_row["requests"] or 0),
+            "input_tokens": int(summary_row["input_tokens"] or 0),
+            "output_tokens": int(summary_row["output_tokens"] or 0),
+            "cached_tokens": int(summary_row["cached_tokens"] or 0),
+            "estimated_cost": float(summary_row["estimated_cost"] or 0),
+        },
+        "active": active,
+        "providers": sorted({row["provider"] for row in filter_rows if row["provider"]}),
+        "models": sorted({row["model"] for row in filter_rows if row["model"]}),
+        "recent": recent,
+        "updated_at": now_iso(),
+        'scope': scope,
+        'mobile_filter_available': mobile_filter_available,
+        'mobile_key_name': MOBILE_KEY_NAME,
+        'attribution': (
+            'agent_remote_mobile_key'
+            if scope == 'mobile'
+            else 'all_9router_requests_on_pc'
+        ),
+    }
+
+
 def git_status(workspace: Path, fetch: bool = False) -> dict:
     result = _git(workspace, "status", "--porcelain=v1", "-z")
     if result.returncode != 0:
@@ -220,6 +600,12 @@ def git_status(workspace: Path, fetch: bool = False) -> dict:
             "remote_url": "",
             "ahead": 0,
             "behind": 0,
+            "upstream": "",
+            "additions": 0,
+            "deletions": 0,
+            "github_cli_installed": shutil.which("gh") is not None,
+            "github_cli_authenticated": False,
+            "github_cli_user": "",
             "incoming": [],
             "outgoing": [],
         }
@@ -231,6 +617,7 @@ def git_status(workspace: Path, fetch: bool = False) -> dict:
     branch = _git(workspace, "branch", "--show-current").stdout.strip()
     remote_url = _git(workspace, "remote", "get-url", "origin").stdout.strip()
     upstream = _git(workspace, "rev-parse", "--abbrev-ref", "@{upstream}")
+    upstream_ref = ""
     ahead = behind = 0
     incoming = []
     outgoing = []
@@ -249,6 +636,8 @@ def git_status(workspace: Path, fetch: bool = False) -> dict:
     match = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
     if match:
         github_owner, github_repo = match.group(1), match.group(2)
+    additions, deletions = _git_line_changes(workspace)
+    github_cli = github_cli_status()
     return {
         "workspace_path": str(workspace),
         "is_git_repo": True,
@@ -257,6 +646,12 @@ def git_status(workspace: Path, fetch: bool = False) -> dict:
         "remote_url": remote_url,
         "ahead": ahead,
         "behind": behind,
+        "upstream": upstream_ref,
+        "additions": additions,
+        "deletions": deletions,
+        "github_cli_installed": github_cli["installed"],
+        "github_cli_authenticated": github_cli["authenticated"],
+        "github_cli_user": github_cli["user"],
         "incoming": incoming,
         "outgoing": outgoing,
         "github_owner": github_owner,
@@ -279,6 +674,134 @@ def tree(workspace: Path, relative: str) -> dict:
             "kind": "directory" if child.is_dir() else "file",
         })
     return {"path": relative, "entries": entries}
+
+
+def _read_text_bytes(raw: bytes) -> str:
+    if len(raw) > MAX_TEXT_FILE_BYTES:
+        raise ValueError('file exceeds 512 KB edit limit')
+    if b'\x00' in raw[:8192]:
+        raise ValueError('binary files cannot be previewed')
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise ValueError('file is not valid UTF-8 text') from error
+
+
+def _git_file_status(workspace: Path, relative: str) -> str:
+    try:
+        result = _git(
+            workspace,
+            'status',
+            '--porcelain=v1',
+            '-z',
+            '--',
+            relative,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    rows = parse_git_status(result.stdout) if result.returncode == 0 else []
+    return str(rows[0]['status']) if rows else ''
+
+
+def _git_file_diff(workspace: Path, relative: str, content: str, exists: bool) -> str:
+    try:
+        result = _git(
+            workspace,
+            'diff',
+            '--no-color',
+            '--no-ext-diff',
+            '--unified=3',
+            'HEAD',
+            '--',
+            relative,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    if result.returncode == 0 and result.stdout:
+        return result.stdout
+    if exists and _git_file_status(workspace, relative) == 'untracked':
+        return '\n'.join(difflib.unified_diff(
+            [],
+            content.splitlines(),
+            fromfile='/dev/null',
+            tofile=f'b/{relative}',
+            lineterm='',
+        ))
+    return ''
+
+
+def workspace_file(workspace: Path, relative: str) -> dict:
+    relative = relative.strip().replace('\\', '/')
+    if not relative:
+        raise ValueError('file path is required')
+    path = resolve_child(workspace, relative)
+    exists = path.is_file()
+    status = _git_file_status(workspace, relative)
+    if exists:
+        raw = path.read_bytes()
+        modified_at = datetime.fromtimestamp(
+            path.stat().st_mtime, timezone.utc
+        ).isoformat()
+    elif status == 'deleted':
+        result = _git(workspace, 'show', f'HEAD:{relative}')
+        if result.returncode != 0:
+            raise ValueError('file not found')
+        raw = result.stdout.encode('utf-8')
+        modified_at = None
+    else:
+        raise ValueError('file not found')
+    content = _read_text_bytes(raw)
+    return {
+        'path': relative,
+        'name': Path(relative).name,
+        'content': content,
+        'diff': _git_file_diff(workspace, relative, content, exists),
+        'hash': hashlib.sha256(raw).hexdigest(),
+        'size': len(raw),
+        'line_count': content.count('\n') + 1,
+        'modified_at': modified_at,
+        'exists': exists,
+        'editable': exists and os.access(path, os.W_OK),
+        'git_status': status,
+        'max_bytes': MAX_TEXT_FILE_BYTES,
+    }
+
+
+def save_workspace_file(
+    workspace: Path,
+    relative: str,
+    content: str,
+    base_hash: str,
+) -> dict:
+    path = resolve_child(workspace, relative.strip().replace('\\', '/'))
+    if not path.is_file():
+        raise ValueError('file not found')
+    current = workspace_file(workspace, relative)
+    if not base_hash or base_hash != current['hash']:
+        raise FileConflictError('file changed on PC; reload before saving')
+    encoded = content.encode('utf-8')
+    if len(encoded) > MAX_TEXT_FILE_BYTES:
+        raise ValueError('file exceeds 512 KB edit limit')
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='wb',
+            dir=path.parent,
+            prefix=f'.{path.name}.',
+            suffix='.agent-remote.tmp',
+            delete=False,
+        ) as temporary:
+            temporary.write(encoded)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path and temporary_path.exists():
+            temporary_path.unlink(missing_ok=True)
+    return workspace_file(workspace, relative)
 
 
 def save_attachments(workspace: Path, attachments: list[dict]) -> list[Path]:
@@ -379,7 +902,7 @@ def workspace_store(workspace: Path) -> SessionStore:
 
 
 STORE = workspace_store(WORKSPACE)
-RUNTIME = AgentRuntime(STORE, agent_command, WORKSPACE)
+RUNTIME = AgentRuntime(STORE, agent_command, WORKSPACE, agent_environment)
 
 
 def folder_listing(path_value: str) -> dict:
@@ -467,8 +990,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self):
         if not TOKEN:
-            return self.client_address[0] in {"127.0.0.1", "::1"}
-        return self.headers.get("Authorization") == f"Bearer {TOKEN}"
+            authorized = self.client_address[0] in {"127.0.0.1", "::1"}
+        else:
+            authorized = self.headers.get("Authorization") == f"Bearer {TOKEN}"
+        record_security_audit(
+            self.client_address[0],
+            authorized,
+            self.command,
+            self.path,
+            self.headers.get("User-Agent", ""),
+        )
+        return authorized
 
     def _stream_event(self, payload):
         self.wfile.write((json.dumps(payload) + "\n").encode())
@@ -498,7 +1030,15 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "workspace": {"name": WORKSPACE.name, "path": str(WORKSPACE)},
                     "permission": PERMISSION_BY_WORKSPACE.get(str(WORKSPACE), "workspace"),
-                    "features": ["streaming", "sessions", "stop", "tools", "multi_agent", "coordinator"],
+                    "features": ["streaming", "sessions", "stop", "tools", "multi_agent", "coordinator", "security_audit", "provider_usage", "mobile_usage_filter", "file_preview", "file_edit"],
+                })
+            if url.path == "/api/security/audit":
+                limit = int(query.get("limit", ["50"])[0])
+                return self._json(HTTPStatus.OK, {
+                    "entries": security_audit_rows(limit),
+                    "peer_ip_only": True,
+                    "success_window_seconds": AUTH_SUCCESS_LOG_WINDOW_SECONDS,
+                    "failure_window_seconds": AUTH_FAILURE_LOG_WINDOW_SECONDS,
                 })
             if url.path == "/api/workspaces":
                 return self._json(HTTPStatus.OK, {"workspaces": workspace_rows()})
@@ -511,6 +1051,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(HTTPStatus.OK, {"agents": available_agents()})
             if url.path == "/api/tasks":
                 return self._json(HTTPStatus.OK, {"tasks": list_all_tasks()})
+            if url.path == "/api/provider-usage":
+                return self._json(
+                    HTTPStatus.OK,
+                    provider_usage(
+                        range_name=query.get("range", ["24h"])[0],
+                        provider=query.get("provider", [""])[0],
+                        model=query.get("model", [""])[0],
+                        scope=query.get('scope', ['all'])[0],
+                        limit=int(query.get("limit", ["50"])[0]),
+                    ),
+                )
             if url.path == "/api/folders":
                 return self._json(
                     HTTPStatus.OK,
@@ -528,11 +1079,39 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if url.path == "/api/tree":
                 return self._json(HTTPStatus.OK, tree(WORKSPACE, query.get("path", [""])[0]))
+            if url.path == '/api/file':
+                return self._json(
+                    HTTPStatus.OK,
+                    {'file': workspace_file(WORKSPACE, query.get('path', [''])[0])},
+                )
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except KeyError:
             self._json(HTTPStatus.NOT_FOUND, {"error": "session not found"})
         except ValueError as error:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+
+    def do_PUT(self):
+        if not self._authorized():
+            return self._json(HTTPStatus.UNAUTHORIZED, {'error': 'unauthorized'})
+        if urlparse(self.path).path != '/api/file':
+            return self._json(HTTPStatus.NOT_FOUND, {'error': 'not found'})
+        try:
+            payload = self._payload()
+            relative = str(payload.get('path') or '')
+            content = payload.get('content')
+            if not isinstance(content, str):
+                raise ValueError('content must be text')
+            document = save_workspace_file(
+                WORKSPACE,
+                relative,
+                content,
+                str(payload.get('base_hash') or ''),
+            )
+            return self._json(HTTPStatus.OK, {'file': document})
+        except FileConflictError as error:
+            return self._json(HTTPStatus.CONFLICT, {'error': str(error)})
+        except (ValueError, OSError) as error:
+            return self._json(HTTPStatus.BAD_REQUEST, {'error': str(error)})
 
     def do_POST(self):
         if not self._authorized():

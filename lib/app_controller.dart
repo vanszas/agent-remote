@@ -42,7 +42,7 @@ class AppController extends ChangeNotifier {
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
     _restoredUiState = await store.loadUiState();
-    page = _restoredUiState.page.clamp(0, 3);
+    page = _restoredUiState.page.clamp(0, 4);
     workspacePath = _restoredUiState.workspacePath;
     sessions.addAll(await store.load());
     if (sessions.any((session) => session.id == _restoredUiState.sessionId)) {
@@ -88,7 +88,7 @@ class AppController extends ChangeNotifier {
       await nextEvents.cancel();
       await next.dispose();
       connected = false;
-      connectorError = _connectionError(error);
+      connectorError = connectionErrorMessage(error);
     }
     notifyListeners();
   }
@@ -143,7 +143,7 @@ class AppController extends ChangeNotifier {
         attachments: attachments,
       );
     } catch (error) {
-      connectorError = _connectionError(error);
+      connectorError = connectionErrorMessage(error);
       final currentSession = current;
       if (currentSession != null) {
         _replace(
@@ -564,7 +564,7 @@ class AppController extends ChangeNotifier {
     try {
       _replace(await connector.loadSession(s.id));
     } catch (error) {
-      connectorError = _connectionError(error);
+      connectorError = connectionErrorMessage(error);
     } finally {
       loadingSession = false;
     }
@@ -628,19 +628,28 @@ class AppController extends ChangeNotifier {
 
 enum ThemeModeChoice { system, light, dark }
 
-String _connectionError(Object error) {
+String connectionErrorMessage(Object error) {
   final text = error.toString();
+  final normalized = text.toLowerCase();
   if (text.contains('HTTP 401')) {
-    return 'Login rejected. Check username or password.';
+    return 'Login ditolak. Periksa username atau password.';
   }
-  if (text.contains('HTTP 403')) return 'Gateway rejected this connection.';
-  if (text.contains('timed out')) {
-    return 'Connection timed out. Check endpoint and Tailscale.';
+  if (text.contains('HTTP 403')) return 'Gateway menolak koneksi ini.';
+  if (normalized.contains('errno = 103') ||
+      normalized.contains('error 103') ||
+      normalized.contains('connection abort')) {
+    return 'Koneksi dibatalkan sebelum mencapai server PC. Pastikan Tailscale HP aktif dan endpoint memakai http://100.x.x.x:9120.';
+  }
+  if (normalized.contains('timed out')) {
+    return 'Koneksi timeout. Periksa endpoint dan Tailscale.';
   }
   if (text.contains('HandshakeException')) {
-    return 'HTTPS certificate or Tailscale connection failed.';
+    return 'Sertifikat HTTPS atau koneksi Tailscale gagal.';
   }
-  return 'Gateway connection failed: ${text.length > 120 ? text.substring(0, 120) : text}';
+  if (text.contains('SocketException')) {
+    return 'Server PC tidak dapat dijangkau. Periksa IP Tailscale, port 9120, dan status Tailscale HP.';
+  }
+  return 'Koneksi gateway gagal: ${text.length > 120 ? text.substring(0, 120) : text}';
 }
 
 String _titleFrom(String text) {

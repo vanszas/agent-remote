@@ -21,11 +21,71 @@ GitRepositoryStatus decodeGitRepositoryStatus(Map<String, Object?> data) {
     remoteUrl: data['remote_url'] as String? ?? '',
     ahead: data['ahead'] as int? ?? 0,
     behind: data['behind'] as int? ?? 0,
+    upstream: data['upstream'] as String? ?? '',
+    additions: data['additions'] as int? ?? 0,
+    deletions: data['deletions'] as int? ?? 0,
+    githubCliInstalled: data['github_cli_installed'] == true,
+    githubCliAuthenticated: data['github_cli_authenticated'] == true,
+    githubCliUser: data['github_cli_user'] as String? ?? '',
     githubOwner: data['github_owner'] as String? ?? '',
     githubRepository: data['github_repo'] as String? ?? '',
     githubAvatarUrl: data['github_avatar_url'] as String? ?? '',
     incoming: commits('incoming'),
     outgoing: commits('outgoing'),
+  );
+}
+
+ProviderUsageEntry _decodeProviderUsageEntry(Map<String, Object?> value) =>
+    ProviderUsageEntry(
+      timestamp:
+          DateTime.tryParse(value['timestamp'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      provider: value['provider'] as String? ?? 'unknown',
+      model: value['model'] as String? ?? 'unknown',
+      endpoint: value['endpoint'] as String? ?? '',
+      inputTokens: (value['input_tokens'] as num?)?.toInt() ?? 0,
+      outputTokens: (value['output_tokens'] as num?)?.toInt() ?? 0,
+      cachedTokens: (value['cached_tokens'] as num?)?.toInt() ?? 0,
+      cost: (value['cost'] as num?)?.toDouble() ?? 0,
+      status: value['status'] as String? ?? 'unknown',
+      isActive: value['is_active'] == true,
+    );
+
+ProviderUsageSnapshot decodeProviderUsage(Map<String, Object?> data) {
+  final summary = Map<String, Object?>.from(
+    data['summary'] as Map? ?? const {},
+  );
+  final active = data['active'];
+  return ProviderUsageSnapshot(
+    available: data['available'] == true,
+    source: data['source'] as String? ?? '9router',
+    range: data['range'] as String? ?? '24h',
+    summary: ProviderUsageSummary(
+      requests: (summary['requests'] as num?)?.toInt() ?? 0,
+      inputTokens: (summary['input_tokens'] as num?)?.toInt() ?? 0,
+      outputTokens: (summary['output_tokens'] as num?)?.toInt() ?? 0,
+      cachedTokens: (summary['cached_tokens'] as num?)?.toInt() ?? 0,
+      estimatedCost: (summary['estimated_cost'] as num?)?.toDouble() ?? 0,
+    ),
+    active: active is Map
+        ? _decodeProviderUsageEntry(Map<String, Object?>.from(active))
+        : null,
+    providers: (data['providers'] as List? ?? const [])
+        .whereType<String>()
+        .toList(),
+    models: (data['models'] as List? ?? const []).whereType<String>().toList(),
+    recent: (data['recent'] as List? ?? const [])
+        .whereType<Map>()
+        .map(
+          (item) => _decodeProviderUsageEntry(Map<String, Object?>.from(item)),
+        )
+        .toList(),
+    attribution: data['attribution'] as String? ?? '',
+    reason: data['reason'] as String? ?? '',
+    scope: data['scope'] as String? ?? 'all',
+    mobileFilterAvailable: data['mobile_filter_available'] == true,
+    mobileKeyName: data['mobile_key_name'] as String? ?? '',
+    updatedAt: DateTime.tryParse(data['updated_at'] as String? ?? ''),
   );
 }
 
@@ -50,6 +110,56 @@ List<WorkspaceEntry> decodeWorkspaceEntries(Map<String, Object?> json) =>
         value['kind'] == 'directory',
       );
     }).toList();
+
+WorkspaceFileDocument decodeWorkspaceFile(Map<String, Object?> json) {
+  final value = Map<String, Object?>.from(json['file'] as Map? ?? json);
+  return WorkspaceFileDocument(
+    path: value['path'] as String? ?? '',
+    name: value['name'] as String? ?? '',
+    content: value['content'] as String? ?? '',
+    diff: value['diff'] as String? ?? '',
+    hash: value['hash'] as String? ?? '',
+    size: (value['size'] as num?)?.toInt() ?? 0,
+    lineCount: (value['line_count'] as num?)?.toInt() ?? 0,
+    exists: value['exists'] != false,
+    editable: value['editable'] == true,
+    gitStatus: value['git_status'] as String? ?? '',
+    maxBytes: (value['max_bytes'] as num?)?.toInt() ?? 0,
+    modifiedAt: DateTime.tryParse(value['modified_at'] as String? ?? ''),
+  );
+}
+
+SecurityAuditSnapshot decodeSecurityAudit(Map<String, Object?> json) {
+  final entries = (json['entries'] as List? ?? const []).whereType<Map>().map((
+    item,
+  ) {
+    final value = Map<String, Object?>.from(item);
+    return SecurityAuditEntry(
+      timestamp:
+          DateTime.tryParse(value['timestamp'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      event: value['event'] as String? ?? 'access_denied',
+      ipAddress: value['ip_address'] as String? ?? 'unknown',
+      method: value['method'] as String? ?? '',
+      path: value['path'] as String? ?? '',
+      userAgent: value['user_agent'] as String? ?? '',
+    );
+  }).toList();
+  return SecurityAuditSnapshot(
+    entries: entries,
+    peerIpOnly: json['peer_ip_only'] != false,
+    successWindowSeconds:
+        (json['success_window_seconds'] as num?)?.toInt() ?? 900,
+    failureWindowSeconds:
+        (json['failure_window_seconds'] as num?)?.toInt() ?? 10,
+  );
+}
+
+bool isTransientRemoteConnectionError(Object error) {
+  if (error is TimeoutException) return true;
+  if (error is! SocketException) return false;
+  return const {54, 103, 104, 10053, 10054}.contains(error.osError?.errorCode);
+}
 
 enum RemoteExecutionMode { single, parallel, coordinator }
 
@@ -92,8 +202,16 @@ class PcFolderListing {
 }
 
 class HermesRemoteConnector
-    implements AgentConnector, WorkspaceMonitor, WorkspaceCatalog {
-  HermesRemoteConnector(this.baseUrl, this.token) : _http = HttpClient();
+    implements
+        AgentConnector,
+        WorkspaceMonitor,
+        WorkspaceCatalog,
+        SecurityMonitor,
+        ProviderUsageMonitor,
+        WorkspaceFileEditor {
+  HermesRemoteConnector(this.baseUrl, this.token) : _http = HttpClient() {
+    _http.connectionTimeout = const Duration(seconds: 10);
+  }
   final Uri baseUrl;
   final String token;
   final HttpClient _http;
@@ -109,7 +227,10 @@ class HermesRemoteConnector
 
   @override
   Stream<AgentEvent> get events => _events.stream;
-  Map<String, String> get _headers => {'Authorization': 'Bearer $token'};
+  Map<String, String> get _headers => {
+    'Authorization': 'Bearer $token',
+    HttpHeaders.userAgentHeader: 'AgentRemote/0.3.0',
+  };
   Uri _url(String path, [Map<String, String>? query]) =>
       baseUrl.replace(path: path, queryParameters: query);
 
@@ -117,12 +238,29 @@ class HermesRemoteConnector
     String path, [
     Map<String, String>? query,
   ]) async {
-    final request = await _http.getUrl(_url(path, query));
-    _headers.forEach(request.headers.set);
-    final response = await request.close();
-    final body = await utf8.decodeStream(response);
-    if (response.statusCode ~/ 100 != 2) throw StateError(body);
-    return Map<String, Object?>.from(jsonDecode(body) as Map);
+    final uri = _url(path, query);
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final request = await _http
+            .getUrl(uri)
+            .timeout(const Duration(seconds: 12));
+        _headers.forEach(request.headers.set);
+        final response = await request.close().timeout(
+          const Duration(seconds: 15),
+        );
+        final body = await utf8
+            .decodeStream(response)
+            .timeout(const Duration(seconds: 15));
+        if (response.statusCode ~/ 100 != 2) {
+          throw HttpException('HTTP ${response.statusCode}: $body', uri: uri);
+        }
+        return Map<String, Object?>.from(jsonDecode(body) as Map);
+      } catch (error) {
+        if (attempt > 0 || !isTransientRemoteConnectionError(error)) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+      }
+    }
+    throw StateError('Remote GET retry exhausted.');
   }
 
   Future<Map<String, Object?>> _request(
@@ -130,7 +268,10 @@ class HermesRemoteConnector
     String path, [
     Map<String, Object?> payload = const {},
   ]) async {
-    final request = await _http.openUrl(method, _url(path));
+    final uri = _url(path);
+    final request = await _http
+        .openUrl(method, uri)
+        .timeout(const Duration(seconds: 12));
     _headers.forEach(request.headers.set);
     request.headers.contentType = ContentType.json;
     if (payload.isNotEmpty) {
@@ -138,9 +279,13 @@ class HermesRemoteConnector
       request.contentLength = body.length;
       request.add(body);
     }
-    final response = await request.close();
-    final body = await utf8.decodeStream(response);
-    if (response.statusCode ~/ 100 != 2) throw StateError(body);
+    final response = await request.close().timeout(const Duration(seconds: 15));
+    final body = await utf8
+        .decodeStream(response)
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode ~/ 100 != 2) {
+      throw HttpException('HTTP ${response.statusCode}: $body', uri: uri);
+    }
     return body.isEmpty
         ? const {}
         : Map<String, Object?>.from(jsonDecode(body) as Map);
@@ -291,8 +436,39 @@ class HermesRemoteConnector
     await _get('/api/git-status', {'fetch': fetch ? '1' : '0'}),
   );
   @override
+  Future<ProviderUsageSnapshot> getProviderUsage({
+    String range = '24h',
+    String provider = '',
+    String model = '',
+    String scope = 'all',
+    int limit = 50,
+  }) async => decodeProviderUsage(
+    await _get('/api/provider-usage', {
+      'range': range,
+      'provider': provider,
+      'model': model,
+      'scope': scope,
+      'limit': '$limit',
+    }),
+  );
+  @override
   Future<List<WorkspaceEntry>> listWorkspace(String path) async =>
       decodeWorkspaceEntries(await _get('/api/tree', {'path': path}));
+  @override
+  Future<WorkspaceFileDocument> getWorkspaceFile(String path) async =>
+      decodeWorkspaceFile(await _get('/api/file', {'path': path}));
+  @override
+  Future<WorkspaceFileDocument> saveWorkspaceFile({
+    required String path,
+    required String content,
+    required String baseHash,
+  }) async => decodeWorkspaceFile(
+    await _request('PUT', '/api/file', {
+      'path': path,
+      'content': content,
+      'base_hash': baseHash,
+    }),
+  );
   @override
   void selectWorkspace(String path) => _workspace = path;
   @override
@@ -497,26 +673,16 @@ class HermesRemoteConnector
   @override
   Future<List<AgentTask>> listTasks() async {
     final data = await _get('/api/tasks');
-    return (data['tasks'] as List? ?? const []).whereType<Map>().map((item) {
-      final value = Map<String, Object?>.from(item);
-      return AgentTask(
-        id: value['id'] as String? ?? '',
-        title: value['title'] as String? ?? 'Agent task',
-        status: value['status'] as String? ?? 'unknown',
-        sessionId: value['session_id'] as String? ?? '',
-        detail: value['detail'] as String? ?? '',
-        agents: (value['agents'] as List? ?? const [])
-            .whereType<String>()
-            .toList(),
-        workspace: value['workspace'] as String? ?? '',
-        permission: value['permission'] as String? ?? '',
-        source: value['source'] as String? ?? 'agent_remote',
-        elapsedSeconds: (value['elapsedSeconds'] as num?)?.toInt() ?? 0,
-        idleSeconds: (value['idleSeconds'] as num?)?.toInt() ?? 0,
-        createdAt: DateTime.tryParse(value['createdAt'] as String? ?? ''),
-        updatedAt: DateTime.tryParse(value['updatedAt'] as String? ?? ''),
-      );
-    }).toList();
+    return (data['tasks'] as List? ?? const [])
+        .whereType<Map>()
+        .map(decodeAgentTask)
+        .toList();
+  }
+
+  @override
+  Future<SecurityAuditSnapshot> getSecurityAudit({int limit = 50}) async {
+    final data = await _get('/api/security/audit', {'limit': '$limit'});
+    return decodeSecurityAudit(data);
   }
 
   @override
@@ -553,6 +719,66 @@ class HermesRemoteConnector
     _http.close(force: true);
     await _events.close();
   }
+}
+
+AgentTask decodeAgentTask(Map item) {
+  final value = Map<String, Object?>.from(item);
+  final agents = (value['agents'] as List? ?? const [])
+      .whereType<String>()
+      .toList();
+  final states = (value['agentStates'] as List? ?? const [])
+      .whereType<Map>()
+      .map((item) {
+        final state = Map<String, Object?>.from(item);
+        return AgentTaskAgentState(
+          id: state['id'] as String? ?? '',
+          name: state['name'] as String? ?? state['id'] as String? ?? 'Agent',
+          status: state['status'] as String? ?? 'unknown',
+          phase: state['phase'] as String? ?? 'preparing',
+          detail: state['detail'] as String? ?? '',
+          role: state['role'] as String? ?? 'agent',
+          elapsedSeconds: (state['elapsedSeconds'] as num?)?.toInt() ?? 0,
+          idleSeconds: (state['idleSeconds'] as num?)?.toInt() ?? 0,
+          startedAt: DateTime.tryParse(state['startedAt'] as String? ?? ''),
+          updatedAt: DateTime.tryParse(state['updatedAt'] as String? ?? ''),
+          completedAt: DateTime.tryParse(state['completedAt'] as String? ?? ''),
+        );
+      })
+      .toList();
+  final status = value['status'] as String? ?? 'unknown';
+  final detail = value['detail'] as String? ?? '';
+  final agentStates = states.isNotEmpty
+      ? states
+      : agents
+            .map(
+              (id) => AgentTaskAgentState(
+                id: id,
+                name: id,
+                status: status,
+                phase: status == 'running' ? 'thinking' : status,
+                detail: detail,
+              ),
+            )
+            .toList();
+  return AgentTask(
+    id: value['id'] as String? ?? '',
+    title: value['title'] as String? ?? 'Agent task',
+    status: status,
+    sessionId: value['session_id'] as String? ?? '',
+    detail: detail,
+    agents: agents,
+    agentStates: agentStates,
+    activeAgent: value['activeAgent'] as String? ?? '',
+    mode: value['mode'] as String? ?? 'single',
+    workspace: value['workspace'] as String? ?? '',
+    permission: value['permission'] as String? ?? '',
+    source: value['source'] as String? ?? 'agent_remote',
+    elapsedSeconds: (value['elapsedSeconds'] as num?)?.toInt() ?? 0,
+    idleSeconds: (value['idleSeconds'] as num?)?.toInt() ?? 0,
+    createdAt: DateTime.tryParse(value['createdAt'] as String? ?? ''),
+    updatedAt: DateTime.tryParse(value['updatedAt'] as String? ?? ''),
+    changedFiles: (value['changedFiles'] as num?)?.toInt() ?? 0,
+  );
 }
 
 // ponytail: HTTP-only; add WebSocket when Hermes CLI output streaming is exposed by server.

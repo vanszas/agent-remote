@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import queue
+import re
 import signal
 import shutil
 import subprocess
@@ -9,6 +10,17 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+AGENT_DISPLAY_NAMES = {
+    "codex": "Codex",
+    "claude": "Claude Code",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+    "hermes": "Hermes",
+}
+TERMINAL_AGENT_STATUSES = {"completed", "failed", "stopped"}
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def now_iso() -> str:
@@ -30,6 +42,37 @@ def elapsed_seconds(started_at: str, ended_at: str | None = None) -> int:
         return max(0, int((ended - started).total_seconds()))
     except (TypeError, ValueError):
         return 0
+
+
+def concise_activity_detail(value: str, limit: int = 240) -> str:
+    cleaned = ANSI_ESCAPE.sub("", value).replace("\r", " ").replace("\n", " ")
+    cleaned = " ".join(cleaned.split())
+    return cleaned if len(cleaned) <= limit else f"{cleaned[:limit - 1]}…"
+
+
+def infer_activity_phase(value: str) -> str:
+    lowered = value.lower()
+    if any(word in lowered for word in (
+        "pytest", "flutter test", "npm test", "pnpm test", "dart test",
+        "flutter analyze", "build apk", "gradle", "compile", "test suite",
+    )):
+        return "testing"
+    if any(word in lowered for word in (
+        "apply_patch", "patching", "updated file", "writing file", "editing",
+        "modified:", "created file", "deleted file",
+    )):
+        return "editing"
+    if any(word in lowered for word in (
+        "powershell", "cmd.exe", "running command", "executing", "git status",
+        "git diff", "git commit", "git push",
+    )):
+        return "running_command"
+    if any(word in lowered for word in (
+        "analyzing", "analysing", "menganalisis", "reasoning", "thinking",
+        "inspecting", "checking files", "reading ",
+    )):
+        return "thinking"
+    return "responding"
 
 
 def available_agents(hermes: Path) -> list[dict]:
@@ -68,8 +111,17 @@ def normalize_codex_event(line: str, agent_id: str) -> list[dict]:
         event = json.loads(line)
     except json.JSONDecodeError:
         return [{"type": "delta", "agent_id": agent_id, "text": f"{line}\n"}]
+    if not isinstance(event, dict):
+        text = str(event).strip()
+        return [{
+            'type': 'delta',
+            'agent_id': agent_id,
+            'text': f'{text}\n',
+            'task_text': concise_activity_detail(text),
+            'phase': infer_activity_phase(text),
+        }] if text else []
     event_type = str(event.get("type") or "")
-    item = event.get("item") if isinstance(event, dict) else None
+    item = event.get("item")
     if not isinstance(item, dict):
         if event_type in {"turn.failed", "error"}:
             return [{
@@ -280,10 +332,17 @@ class SessionStore:
 
 
 class AgentRuntime:
-    def __init__(self, store: SessionStore, command_factory, workspace: Path):
+    def __init__(
+        self,
+        store: SessionStore,
+        command_factory,
+        workspace: Path,
+        environment_factory=None,
+    ):
         self.store = store
         self.command_factory = command_factory
         self.workspace = workspace
+        self.environment_factory = environment_factory
         self.lock = threading.RLock()
         self.processes = {}
         self.session_runs = {}
@@ -317,6 +376,17 @@ class AgentRuntime:
             ended_at = None if task.get("status") == "running" else task.get("updatedAt")
             task["elapsedSeconds"] = elapsed_seconds(task.get("createdAt", ""), ended_at)
             task["idleSeconds"] = elapsed_seconds(task.get("updatedAt", ""))
+            for state in task.get("agentStates", []):
+                state_ended_at = (
+                    None
+                    if state.get("status") not in TERMINAL_AGENT_STATUSES
+                    else state.get("completedAt") or state.get("updatedAt")
+                )
+                state["elapsedSeconds"] = elapsed_seconds(
+                    state.get("startedAt") or state.get("updatedAt", ""),
+                    state_ended_at,
+                )
+                state["idleSeconds"] = elapsed_seconds(state.get("updatedAt", ""))
         return snapshot
 
     def _update_task(self, run_id: str, **changes):
@@ -326,6 +396,78 @@ class AgentRuntime:
                 return
             task.update(changes)
             task["updatedAt"] = now_iso()
+
+    def _update_agent_state(
+        self,
+        run_id: str,
+        agent_id: str,
+        *,
+        status: str | None = None,
+        phase: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        timestamp = now_iso()
+        with self.lock:
+            task = self.tasks.get(run_id)
+            if task is None:
+                return
+            states = task.setdefault("agentStates", [])
+            state = next(
+                (item for item in states if item.get("id") == agent_id),
+                None,
+            )
+            if state is None:
+                state = {
+                    "id": agent_id,
+                    "name": AGENT_DISPLAY_NAMES.get(agent_id, agent_id),
+                    "role": "agent",
+                    "status": "queued",
+                    "phase": "preparing",
+                    "detail": "Menunggu eksekusi",
+                    "startedAt": None,
+                    "updatedAt": timestamp,
+                    "completedAt": None,
+                }
+                states.append(state)
+            if status is not None:
+                state["status"] = status
+                if status == "running" and not state.get("startedAt"):
+                    state["startedAt"] = timestamp
+                if status in TERMINAL_AGENT_STATUSES:
+                    state["completedAt"] = timestamp
+            if phase is not None:
+                state["phase"] = phase
+            if detail is not None:
+                state["detail"] = concise_activity_detail(detail)
+                task["detail"] = state["detail"]
+            state["updatedAt"] = timestamp
+            if state.get("status") == "running":
+                task["activeAgent"] = agent_id
+            task["updatedAt"] = timestamp
+
+    def _finish_pending_agent_states(
+        self,
+        run_id: str,
+        status: str,
+        phase: str,
+        detail: str,
+    ) -> None:
+        with self.lock:
+            task = self.tasks.get(run_id)
+            agent_ids = [
+                state.get("id", "")
+                for state in task.get("agentStates", [])
+                if state.get("status") not in TERMINAL_AGENT_STATUSES
+            ] if task else []
+        for agent_id in agent_ids:
+            if agent_id:
+                self._update_agent_state(
+                    run_id,
+                    agent_id,
+                    status=status,
+                    phase=phase,
+                    detail=detail,
+                )
 
     def _terminate_process_tree(
         self,
@@ -411,6 +553,9 @@ class AgentRuntime:
             session_id, run_id, "system", "stopped", "stopped", "Dihentikan pengguna"
         )
         self._update_task(run_id, status="stopped", detail="Dihentikan pengguna")
+        self._finish_pending_agent_states(
+            run_id, "stopped", "stopped", "Dihentikan pengguna"
+        )
         return True
 
     def _run_agent(
@@ -423,16 +568,27 @@ class AgentRuntime:
         attachments: list[Path],
         permission: str,
         events: queue.Queue,
+        initial_phase: str = "preparing",
+        initial_detail: str = "Menyiapkan agent",
     ) -> str:
         output = []
         process = None
         try:
+            self._update_agent_state(
+                run_id,
+                agent_id,
+                status="running",
+                phase=initial_phase,
+                detail=initial_detail,
+            )
             self.store.append_activity(
-                session_id, run_id, agent_id, "thinking", "running", "Menyiapkan agent"
+                session_id, run_id, agent_id, initial_phase, "running", initial_detail
             )
             process_environment = os.environ.copy()
-            process_environment["GIT_TERMINAL_PROMPT"] = "0"
-            process_environment["GCM_INTERACTIVE"] = "Never"
+            if self.environment_factory:
+                process_environment.update(self.environment_factory(agent_id))
+            process_environment['GIT_TERMINAL_PROMPT'] = '0'
+            process_environment['GCM_INTERACTIVE'] = 'Never'
             process_group = (
                 {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
                 if os.name == "nt"
@@ -459,12 +615,27 @@ class AgentRuntime:
                 value = raw.rstrip()
                 if not value:
                     continue
-                normalized = normalize_codex_event(value, agent_id) if agent_id == "codex" else [
-                    {"type": "delta", "agent_id": agent_id, "text": f"{value}\n"}
-                ]
+                if agent_id == "codex":
+                    normalized = normalize_codex_event(value, agent_id)
+                else:
+                    detail = concise_activity_detail(value)
+                    normalized = [{
+                        "type": "delta",
+                        "agent_id": agent_id,
+                        "text": f"{value}\n",
+                        "task_text": detail,
+                        "phase": infer_activity_phase(detail),
+                    }]
                 for event in normalized:
                     if event["type"] == "delta":
                         output.append(event["text"])
+                        self._update_agent_state(
+                            run_id,
+                            agent_id,
+                            status="running",
+                            phase=str(event.get("phase") or "responding"),
+                            detail=str(event.get("task_text") or event["text"]),
+                        )
                     elif event["type"] == "reasoning":
                         self.store.append_activity(
                             session_id,
@@ -473,6 +644,13 @@ class AgentRuntime:
                             "thinking",
                             event.get("status", "running"),
                             event.get("text", "Menganalisis task"),
+                        )
+                        self._update_agent_state(
+                            run_id,
+                            agent_id,
+                            status="running",
+                            phase="thinking",
+                            detail=str(event.get("task_text") or "Menganalisis task"),
                         )
                     elif event["type"] in {"tool_started", "tool_completed"}:
                         detail = str(event.get("text") or event.get("name") or "Menjalankan tool")
@@ -495,25 +673,62 @@ class AgentRuntime:
                             str(event.get("name") or ""),
                             str(event.get("output") or ""),
                         )
-                    self._update_task(
-                        run_id,
-                        detail=event.get("task_text") or event.get("text") or event.get("name") or event["type"],
-                        activeAgent=agent_id,
-                    )
+                        self._update_agent_state(
+                            run_id,
+                            agent_id,
+                            status="running",
+                            phase=kind,
+                            detail=str(event.get("task_text") or detail),
+                        )
+                    elif event["type"] == "agent_failed":
+                        raise RuntimeError(str(event.get("error") or "Agent gagal"))
                     events.put(event)
             return_code = process.wait(timeout=10)
             if run_id in self.cancelled:
+                self._update_agent_state(
+                    run_id,
+                    agent_id,
+                    status="stopped",
+                    phase="stopped",
+                    detail="Dihentikan pengguna",
+                )
                 events.put({"type": "agent_stopped", "agent_id": agent_id})
                 return "".join(output).strip()
             if return_code != 0:
                 error_output = "".join(output).strip()
                 raise RuntimeError(error_output[-2000:] or f"{agent_id} exited with {return_code}")
             events.put({"type": "agent_completed", "agent_id": agent_id})
+            self._update_agent_state(
+                run_id,
+                agent_id,
+                status="completed",
+                phase="completed",
+                detail="Agent selesai",
+            )
             self.store.append_activity(
                 session_id, run_id, agent_id, "verifying", "completed", "Agent selesai"
             )
             return "".join(output).strip()
         except Exception as error:
+            if process is not None:
+                self._terminate_process_tree(process)
+            if run_id in self.cancelled:
+                self._update_agent_state(
+                    run_id,
+                    agent_id,
+                    status="stopped",
+                    phase="stopped",
+                    detail="Dihentikan pengguna",
+                )
+                events.put({"type": "agent_stopped", "agent_id": agent_id})
+                return "".join(output).strip()
+            self._update_agent_state(
+                run_id,
+                agent_id,
+                status="failed",
+                phase="failed",
+                detail=str(error),
+            )
             events.put({"type": "agent_failed", "agent_id": agent_id, "error": str(error)})
             self.store.append_activity(
                 session_id, run_id, agent_id, "failed", "failed", str(error)
@@ -541,6 +756,33 @@ class AgentRuntime:
         timestamp = now_iso()
         task_workspace = self.workspace
         baseline_git_state = self._git_changed_state(task_workspace)
+        effective_agent_ids = agent_ids[:1] if mode == "single" else agent_ids
+        lead = (
+            coordinator if coordinator in effective_agent_ids else effective_agent_ids[0]
+        ) if effective_agent_ids else ""
+        agent_states = []
+        for agent_id in effective_agent_ids:
+            role = (
+                "coordinator" if mode == "coordinator" and agent_id == lead
+                else "worker" if mode == "coordinator"
+                else "agent"
+            )
+            detail = (
+                "Menunggu hasil agent lain"
+                if role == "coordinator" and len(effective_agent_ids) > 1
+                else "Menunggu eksekusi"
+            )
+            agent_states.append({
+                "id": agent_id,
+                "name": AGENT_DISPLAY_NAMES.get(agent_id, agent_id),
+                "role": role,
+                "status": "queued",
+                "phase": "coordinating" if role == "coordinator" else "preparing",
+                "detail": detail,
+                "startedAt": None,
+                "updatedAt": timestamp,
+                "completedAt": None,
+            })
         with self.lock:
             self.session_runs[session_id] = run_id
             self.tasks[run_id] = {
@@ -549,7 +791,9 @@ class AgentRuntime:
                 "title": text.strip().splitlines()[0][:80] or "Agent task",
                 "status": "running",
                 "detail": "Menyiapkan agent…",
-                "agents": agent_ids,
+                "agents": effective_agent_ids,
+                "agentStates": agent_states,
+                "activeAgent": "",
                 "mode": mode,
                 "source": "agent_remote",
                 "permission": permission,
@@ -561,22 +805,21 @@ class AgentRuntime:
         self.store.update(
             session_id,
             status="generating",
-            activeModelName=" + ".join(agent_ids),
+            activeModelName=" + ".join(effective_agent_ids),
         )
         self.store.append_message(session_id, "user", text)
         self.store.append_activity(
             session_id,
             run_id,
-            "+".join(agent_ids),
+            "+".join(effective_agent_ids),
             "queued",
             "completed",
             "Task diterima dan masuk antrean",
         )
         results = {}
         try:
-            if mode == "coordinator" and len(agent_ids) > 1:
-                lead = coordinator if coordinator in agent_ids else agent_ids[0]
-                workers = [agent for agent in agent_ids if agent != lead]
+            if mode == "coordinator" and len(effective_agent_ids) > 1:
+                workers = [agent for agent in effective_agent_ids if agent != lead]
                 with concurrent.futures.ThreadPoolExecutor(
                     max_workers=len(workers)
                 ) as executor:
@@ -616,9 +859,11 @@ class AgentRuntime:
                         attachments,
                         permission,
                         events,
+                        initial_phase="coordinating",
+                        initial_detail="Menggabungkan hasil agent dan menyelesaikan task",
                     )
             else:
-                selected = agent_ids[:1] if mode == "single" else agent_ids
+                selected = effective_agent_ids
                 with concurrent.futures.ThreadPoolExecutor(
                     max_workers=len(selected)
                 ) as executor:
@@ -660,6 +905,12 @@ class AgentRuntime:
             )
             self.store.update(session_id, status="failed" if failed else "idle")
             final_status = "failed" if failed else "completed"
+            self._finish_pending_agent_states(
+                run_id,
+                "failed" if failed else "completed",
+                "failed" if failed else "completed",
+                completion_detail,
+            )
             self._update_task(
                 run_id,
                 status=final_status,
@@ -669,7 +920,7 @@ class AgentRuntime:
             self.store.append_activity(
                 session_id,
                 run_id,
-                "+".join(agent_ids),
+                "+".join(effective_agent_ids),
                 "failed" if failed else "completed",
                 "failed" if failed else "completed",
                 completion_detail,

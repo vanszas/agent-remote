@@ -33,11 +33,22 @@ class AgentTask {
     this.agents = const [],
     this.workspace = '',
     this.permission = '',
+    this.source = 'agent_remote',
+    this.elapsedSeconds = 0,
+    this.idleSeconds = 0,
     this.createdAt,
     this.updatedAt,
   });
-  final String id, title, status, sessionId, detail, workspace, permission;
+  final String id,
+      title,
+      status,
+      sessionId,
+      detail,
+      workspace,
+      permission,
+      source;
   final List<String> agents;
+  final int elapsedSeconds, idleSeconds;
   final DateTime? createdAt, updatedAt;
 }
 

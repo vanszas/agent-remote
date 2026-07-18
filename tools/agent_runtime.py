@@ -1,6 +1,8 @@
 import concurrent.futures
 import json
+import os
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -15,6 +17,19 @@ def now_iso() -> str:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def elapsed_seconds(started_at: str, ended_at: str | None = None) -> int:
+    try:
+        started = datetime.fromisoformat(started_at)
+        ended = datetime.fromisoformat(ended_at) if ended_at else datetime.now(timezone.utc)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        return max(0, int((ended - started).total_seconds()))
+    except (TypeError, ValueError):
+        return 0
 
 
 def available_agents(hermes: Path) -> list[dict]:
@@ -66,14 +81,20 @@ def normalize_codex_event(line: str, agent_id: str) -> list[dict]:
     item_type = str(item.get("type") or "")
     if item_type == "agent_message" and event_type in {"item.completed", "item.updated"}:
         text = str(item.get("text") or "")
-        return [{"type": "delta", "agent_id": agent_id, "text": f"{text}\n"}] if text else []
+        return [{
+            "type": "delta",
+            "agent_id": agent_id,
+            "text": f"{text}\n",
+            "task_text": "Menyusun respons akhir",
+        }] if text else []
     if item_type == "reasoning" and event_type in {"item.started", "item.updated", "item.completed"}:
-        text = str(item.get("text") or item.get("summary") or "").strip()
+        completed = event_type == "item.completed"
         return [{
             "type": "reasoning",
             "agent_id": agent_id,
-            "text": text or "Agent sedang menganalisis…",
-            "status": "completed" if event_type == "item.completed" else "running",
+            "text": "Analisis tahap selesai" if completed else "Menganalisis task",
+            "task_text": "Menunggu langkah agent berikutnya" if completed else "Menganalisis task",
+            "status": "completed" if completed else "running",
         }]
     if item_type not in {"command_execution", "mcp_tool_call", "web_search"}:
         return []
@@ -81,10 +102,25 @@ def normalize_codex_event(line: str, agent_id: str) -> list[dict]:
     name = "shell" if item_type == "command_execution" else str(item.get("server") or item_type)
     if event_type == "item.started":
         detail = item.get("command") or item.get("query") or item.get("arguments") or ""
-        return [{"type": "tool_started", "agent_id": agent_id, "tool_id": tool_id, "name": name, "text": str(detail)}]
+        return [{
+            "type": "tool_started",
+            "agent_id": agent_id,
+            "tool_id": tool_id,
+            "name": name,
+            "text": str(detail),
+            "task_text": str(detail) or f"Menjalankan {name}",
+        }]
     if event_type == "item.completed":
-        detail = item.get("aggregated_output") or item.get("output") or item.get("result") or ""
-        return [{"type": "tool_completed", "agent_id": agent_id, "tool_id": tool_id, "name": name, "text": str(detail)}]
+        output = item.get("aggregated_output") or item.get("output") or item.get("result") or ""
+        return [{
+            "type": "tool_completed",
+            "agent_id": agent_id,
+            "tool_id": tool_id,
+            "name": name,
+            "text": f"{name} selesai",
+            "task_text": f"{name} selesai, menunggu langkah berikutnya",
+            "output": str(output),
+        }]
     return []
 
 
@@ -104,6 +140,10 @@ class SessionStore:
                 for item in payload
                 if isinstance(item, dict) and item.get("id")
             }
+            for session in self.sessions.values():
+                session.setdefault("activities", [])
+                if session.get("activeModelName") in {"Hermes PC", "Hermes Agent"}:
+                    session["activeModelName"] = "PC Agent"
         except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
             self.sessions = {}
 
@@ -154,6 +194,7 @@ class SessionStore:
             "status": "idle",
             "preview": "",
             "messageCount": 0,
+            "activities": [],
         }
         with self.lock:
             self.sessions[session["id"]] = session
@@ -196,6 +237,40 @@ class SessionStore:
             self._save()
             return json.loads(json.dumps(message))
 
+    def append_activity(
+        self,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        kind: str,
+        status: str,
+        detail: str,
+        tool_id: str = "",
+        tool_name: str = "",
+        output: str = "",
+    ) -> dict:
+        timestamp = now_iso()
+        activity = {
+            "id": new_id("activity"),
+            "runId": run_id,
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "kind": kind,
+            "status": status,
+            "detail": detail[:4000],
+            "toolId": tool_id,
+            "toolName": tool_name,
+            "output": output[:12000],
+            "createdAt": timestamp,
+        }
+        with self.lock:
+            session = self.sessions[session_id]
+            session.setdefault("activities", []).append(activity)
+            session["activities"] = session["activities"][-300:]
+            session["updatedAt"] = timestamp
+            self._save()
+        return json.loads(json.dumps(activity))
+
     def delete(self, session_id: str):
         with self.lock:
             if session_id not in self.sessions:
@@ -219,6 +294,9 @@ class AgentRuntime:
         with self.lock:
             self.processes.setdefault(run_id, []).append(process)
             self.session_runs[session_id] = run_id
+            cancelled = run_id in self.cancelled
+        if cancelled:
+            self._terminate_process_tree(process)
 
     def _unregister(self, run_id: str, session_id: str, process: subprocess.Popen):
         with self.lock:
@@ -234,7 +312,12 @@ class AgentRuntime:
                 key=lambda item: item.get("updatedAt", ""),
                 reverse=True,
             )
-            return json.loads(json.dumps(values[:100]))
+            snapshot = json.loads(json.dumps(values[:100]))
+        for task in snapshot:
+            ended_at = None if task.get("status") == "running" else task.get("updatedAt")
+            task["elapsedSeconds"] = elapsed_seconds(task.get("createdAt", ""), ended_at)
+            task["idleSeconds"] = elapsed_seconds(task.get("updatedAt", ""))
+        return snapshot
 
     def _update_task(self, run_id: str, **changes):
         with self.lock:
@@ -244,6 +327,76 @@ class AgentRuntime:
             task.update(changes)
             task["updatedAt"] = now_iso()
 
+    def _terminate_process_tree(
+        self,
+        process: subprocess.Popen,
+        platform_name: str | None = None,
+    ) -> None:
+        if process.poll() is not None:
+            return
+        platform_name = platform_name or os.name
+        try:
+            if platform_name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            else:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=5)
+        except (OSError, ProcessLookupError, subprocess.SubprocessError):
+            if process.poll() is None:
+                try:
+                    if platform_name == "nt":
+                        process.kill()
+                    else:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+
+    def _git_changed_state(self, workspace: Path) -> dict[bytes, tuple[bool, int, int]]:
+        try:
+            changed = subprocess.run(
+                ["git", "-C", str(workspace), "diff", "--name-only", "-z", "HEAD"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            untracked = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                ],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if changed.returncode != 0 or untracked.returncode != 0:
+                return {}
+            paths = {
+                value
+                for value in (changed.stdout + untracked.stdout).split(b"\0")
+                if value
+            }
+            state = {}
+            for value in paths:
+                path = workspace / value.decode("utf-8", errors="replace")
+                try:
+                    stat = path.stat()
+                    state[value] = (True, stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    state[value] = (False, 0, 0)
+            return state
+        except (OSError, subprocess.SubprocessError):
+            return {}
+
     def stop_session(self, session_id: str) -> bool:
         with self.lock:
             run_id = self.session_runs.get(session_id)
@@ -252,9 +405,11 @@ class AgentRuntime:
             self.cancelled.add(run_id)
             processes = list(self.processes.get(run_id, []))
         for process in processes:
-            if process.poll() is None:
-                process.terminate()
+            self._terminate_process_tree(process)
         self.store.update(session_id, status="stopped")
+        self.store.append_activity(
+            session_id, run_id, "system", "stopped", "stopped", "Dihentikan pengguna"
+        )
         self._update_task(run_id, status="stopped", detail="Dihentikan pengguna")
         return True
 
@@ -272,15 +427,29 @@ class AgentRuntime:
         output = []
         process = None
         try:
+            self.store.append_activity(
+                session_id, run_id, agent_id, "thinking", "running", "Menyiapkan agent"
+            )
+            process_environment = os.environ.copy()
+            process_environment["GIT_TERMINAL_PROMPT"] = "0"
+            process_environment["GCM_INTERACTIVE"] = "Never"
+            process_group = (
+                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if os.name == "nt"
+                else {"start_new_session": True}
+            )
             process = subprocess.Popen(
                 self.command_factory(agent_id, text, model, attachments, permission),
                 cwd=self.workspace,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=process_environment,
+                **process_group,
             )
             self._register(run_id, session_id, process)
             assert process.stdout is not None
@@ -296,26 +465,64 @@ class AgentRuntime:
                 for event in normalized:
                     if event["type"] == "delta":
                         output.append(event["text"])
+                    elif event["type"] == "reasoning":
+                        self.store.append_activity(
+                            session_id,
+                            run_id,
+                            agent_id,
+                            "thinking",
+                            event.get("status", "running"),
+                            event.get("text", "Menganalisis task"),
+                        )
+                    elif event["type"] in {"tool_started", "tool_completed"}:
+                        detail = str(event.get("text") or event.get("name") or "Menjalankan tool")
+                        lowered = detail.lower()
+                        kind = (
+                            "testing"
+                            if any(word in lowered for word in (" test", "pytest", "analyze", "build"))
+                            else "editing"
+                            if any(word in lowered for word in ("apply_patch", "write", "edit"))
+                            else "running_command"
+                        )
+                        self.store.append_activity(
+                            session_id,
+                            run_id,
+                            agent_id,
+                            kind,
+                            "completed" if event["type"] == "tool_completed" else "running",
+                            detail,
+                            str(event.get("tool_id") or ""),
+                            str(event.get("name") or ""),
+                            str(event.get("output") or ""),
+                        )
                     self._update_task(
                         run_id,
-                        detail=event.get("text") or event.get("name") or event["type"],
+                        detail=event.get("task_text") or event.get("text") or event.get("name") or event["type"],
                         activeAgent=agent_id,
                     )
                     events.put(event)
-            stderr = process.stderr.read().strip() if process.stderr else ""
             return_code = process.wait(timeout=10)
             if run_id in self.cancelled:
                 events.put({"type": "agent_stopped", "agent_id": agent_id})
                 return "".join(output).strip()
             if return_code != 0:
-                raise RuntimeError(stderr or f"{agent_id} exited with {return_code}")
+                error_output = "".join(output).strip()
+                raise RuntimeError(error_output[-2000:] or f"{agent_id} exited with {return_code}")
             events.put({"type": "agent_completed", "agent_id": agent_id})
+            self.store.append_activity(
+                session_id, run_id, agent_id, "verifying", "completed", "Agent selesai"
+            )
             return "".join(output).strip()
         except Exception as error:
             events.put({"type": "agent_failed", "agent_id": agent_id, "error": str(error)})
+            self.store.append_activity(
+                session_id, run_id, agent_id, "failed", "failed", str(error)
+            )
             return ""
         finally:
             if process is not None:
+                if run_id in self.cancelled:
+                    self._terminate_process_tree(process)
                 self._unregister(run_id, session_id, process)
 
     def execute(
@@ -332,6 +539,8 @@ class AgentRuntime:
     ):
         run_id = new_id("run")
         timestamp = now_iso()
+        task_workspace = self.workspace
+        baseline_git_state = self._git_changed_state(task_workspace)
         with self.lock:
             self.session_runs[session_id] = run_id
             self.tasks[run_id] = {
@@ -342,8 +551,10 @@ class AgentRuntime:
                 "detail": "Menyiapkan agent…",
                 "agents": agent_ids,
                 "mode": mode,
+                "source": "agent_remote",
                 "permission": permission,
                 "workspace": str(self.workspace),
+                "changedFiles": 0,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             }
@@ -353,6 +564,14 @@ class AgentRuntime:
             activeModelName=" + ".join(agent_ids),
         )
         self.store.append_message(session_id, "user", text)
+        self.store.append_activity(
+            session_id,
+            run_id,
+            "+".join(agent_ids),
+            "queued",
+            "completed",
+            "Task diterima dan masuk antrean",
+        )
         results = {}
         try:
             if mode == "coordinator" and len(agent_ids) > 1:
@@ -430,12 +649,30 @@ class AgentRuntime:
             if combined:
                 self.store.append_message(session_id, "assistant", combined)
             failed = not any(results.values())
+            current_git_state = self._git_changed_state(task_workspace)
+            changed_files = sum(
+                1
+                for path in baseline_git_state.keys() | current_git_state.keys()
+                if baseline_git_state.get(path) != current_git_state.get(path)
+            )
+            completion_detail = (
+                "Task gagal" if failed else f"Task selesai • {changed_files} file berubah"
+            )
             self.store.update(session_id, status="failed" if failed else "idle")
             final_status = "failed" if failed else "completed"
             self._update_task(
                 run_id,
                 status=final_status,
-                detail="Task gagal" if failed else "Task selesai",
+                detail=completion_detail,
+                changedFiles=changed_files,
+            )
+            self.store.append_activity(
+                session_id,
+                run_id,
+                "+".join(agent_ids),
+                "failed" if failed else "completed",
+                "failed" if failed else "completed",
+                completion_detail,
             )
             events.put({"type": "completed", "ok": not failed, "run_id": run_id})
         finally:

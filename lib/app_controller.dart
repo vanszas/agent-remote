@@ -12,6 +12,7 @@ class AppController extends ChangeNotifier {
   StreamSubscription<AgentEvent>? _sub;
   Timer? _taskTimer;
   Timer? _saveTimer;
+  AppUiState _restoredUiState = const AppUiState();
   String? currentId;
   ThemeModeChoice theme = ThemeModeChoice.system;
   int page = 0;
@@ -40,7 +41,13 @@ class AppController extends ChangeNotifier {
   AgentSession? get current =>
       sessions.where((s) => s.id == currentId).firstOrNull;
   Future<void> initialize() async {
+    _restoredUiState = await store.loadUiState();
+    page = _restoredUiState.page.clamp(0, 3);
+    workspacePath = _restoredUiState.workspacePath;
     sessions.addAll(await store.load());
+    if (sessions.any((session) => session.id == _restoredUiState.sessionId)) {
+      currentId = _restoredUiState.sessionId;
+    }
     _sub = connector.events.listen(_event);
     try {
       await connector.initialize();
@@ -170,6 +177,7 @@ class AppController extends ChangeNotifier {
     final s = sessions.where((x) => x.id == e.sessionId).firstOrNull;
     if (s == null) return;
     var messages = [...s.messages];
+    var activities = [...s.activities];
     final id = e.correlationId ?? 'demo';
     var ai = messages.where((m) => m.id == id).firstOrNull;
     switch (e.type) {
@@ -193,6 +201,21 @@ class AppController extends ChangeNotifier {
         }
         break;
       case AgentEventType.toolStarted:
+        activities.add(
+          AgentActivity(
+            id: '${id}_${DateTime.now().microsecondsSinceEpoch}',
+            runId: id,
+            sessionId: s.id,
+            agentId: e.data['agent_id'] as String? ?? '',
+            kind: e.data['name'] == 'reasoning'
+                ? 'thinking'
+                : 'running_command',
+            status: 'running',
+            detail: e.text.isEmpty ? 'Agent sedang bekerja' : e.text,
+            createdAt: DateTime.now(),
+            toolName: e.data['name'] as String? ?? '',
+          ),
+        );
         if (ai != null) {
           final isSubagent = e.data['child_session_id'] != null;
           final toolName =
@@ -328,6 +351,18 @@ class AppController extends ChangeNotifier {
         }
         break;
       case AgentEventType.messageCompleted:
+        activities.add(
+          AgentActivity(
+            id: '${id}_completed',
+            runId: id,
+            sessionId: s.id,
+            agentId: s.activeModelName ?? '',
+            kind: 'completed',
+            status: 'completed',
+            detail: 'Task selesai',
+            createdAt: DateTime.now(),
+          ),
+        );
         if (ai != null) {
           messages[messages.indexOf(ai)] = ai.copyWith(
             status: MessageStatus.complete,
@@ -357,6 +392,9 @@ class AppController extends ChangeNotifier {
     _replace(
       s.copyWith(
         messages: messages,
+        activities: activities.length > 300
+            ? activities.sublist(activities.length - 300)
+            : activities,
         status: e.type == AgentEventType.messageCompleted
             ? SessionStatus.idle
             : e.type == AgentEventType.messageFailed
@@ -472,6 +510,7 @@ class AppController extends ChangeNotifier {
     await reloadSessions();
     await reloadProjects();
     await reloadWorkspaceData();
+    await _persistUiState();
   }
 
   Future<void> openProjectSession(
@@ -530,17 +569,27 @@ class AppController extends ChangeNotifier {
       loadingSession = false;
     }
     notifyListeners();
+    await _persistUiState();
   }
 
   Future<void> closeCurrentSession() async {
     currentId = null;
     await reloadProjects();
     notifyListeners();
+    await _persistUiState();
+  }
+
+  Future<void> restoreLastSession([String? requestedSessionId]) async {
+    final target = requestedSessionId ?? _restoredUiState.sessionId;
+    if (target == null || target.isEmpty) return;
+    final session = sessions.where((item) => item.id == target).firstOrNull;
+    if (session != null) await open(session);
   }
 
   void setPage(int v) {
     page = v;
     notifyListeners();
+    _persistUiState();
   }
 
   void setTheme(ThemeModeChoice v) {
@@ -564,6 +613,9 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _save() => store.save(sessions);
+  Future<void> _persistUiState() => store.saveUiState(
+    AppUiState(sessionId: currentId, workspacePath: workspacePath, page: page),
+  );
   @override
   void dispose() {
     _taskTimer?.cancel();

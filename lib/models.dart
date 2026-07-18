@@ -356,6 +356,7 @@ class AgentSession {
     this.status = SessionStatus.idle,
     this.preview = '',
     this.messageCount = 0,
+    this.activities = const [],
   });
   final String id, title, workspaceName, draftText, preview;
   final int messageCount;
@@ -363,6 +364,7 @@ class AgentSession {
   final bool isPinned, isArchived;
   final String? connectionProfileId, activeModelName;
   final List<ChatMessage> messages;
+  final List<AgentActivity> activities;
   final SessionStatus status;
   AgentSession copyWith({
     String? title,
@@ -373,6 +375,7 @@ class AgentSession {
     SessionStatus? status,
     String? preview,
     int? messageCount,
+    List<AgentActivity>? activities,
   }) => AgentSession(
     id: id,
     title: title ?? this.title,
@@ -388,6 +391,7 @@ class AgentSession {
     status: status ?? this.status,
     preview: preview ?? this.preview,
     messageCount: messageCount ?? this.messageCount,
+    activities: activities ?? this.activities,
   );
   Map<String, Object?> toJson() => {
     'id': id,
@@ -404,6 +408,7 @@ class AgentSession {
     'status': status.name,
     'preview': preview,
     'messageCount': messageCount,
+    'activities': activities.map((e) => e.toJson()).toList(),
   };
   factory AgentSession.fromJson(Map<String, Object?> j) => AgentSession(
     id: j['id'] as String? ?? '',
@@ -425,6 +430,66 @@ class AgentSession {
     status: _enum(SessionStatus.values, j['status'], SessionStatus.idle),
     preview: j['preview'] as String? ?? '',
     messageCount: (j['messageCount'] as num?)?.toInt() ?? 0,
+    activities: (j['activities'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => AgentActivity.fromJson(Map<String, Object?>.from(e)))
+        .toList(),
+  );
+}
+
+class AgentActivity {
+  const AgentActivity({
+    required this.id,
+    required this.runId,
+    required this.sessionId,
+    required this.agentId,
+    required this.kind,
+    required this.status,
+    required this.detail,
+    required this.createdAt,
+    this.toolId = '',
+    this.toolName = '',
+    this.output = '',
+  });
+  final String id,
+      runId,
+      sessionId,
+      agentId,
+      kind,
+      status,
+      detail,
+      toolId,
+      toolName,
+      output;
+  final DateTime createdAt;
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'runId': runId,
+    'sessionId': sessionId,
+    'agentId': agentId,
+    'kind': kind,
+    'status': status,
+    'detail': detail,
+    'toolId': toolId,
+    'toolName': toolName,
+    'output': output,
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory AgentActivity.fromJson(Map<String, Object?> json) => AgentActivity(
+    id: json['id'] as String? ?? '',
+    runId: json['runId'] as String? ?? '',
+    sessionId: json['sessionId'] as String? ?? '',
+    agentId: json['agentId'] as String? ?? '',
+    kind: json['kind'] as String? ?? 'thinking',
+    status: json['status'] as String? ?? 'running',
+    detail: json['detail'] as String? ?? '',
+    toolId: json['toolId'] as String? ?? '',
+    toolName: json['toolName'] as String? ?? '',
+    output: json['output'] as String? ?? '',
+    createdAt:
+        DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
   );
 }
 
@@ -436,6 +501,28 @@ String sanitizeFilename(String value) {
       .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
       .trim();
   return name.isEmpty ? 'attachment' : name;
+}
+
+String formatElapsedDuration(int totalSeconds) {
+  final safeSeconds = totalSeconds < 0 ? 0 : totalSeconds;
+  if (safeSeconds < 60) return '$safeSeconds detik';
+  final minutes = safeSeconds ~/ 60;
+  final seconds = safeSeconds % 60;
+  if (minutes < 60) {
+    return seconds == 0 ? '$minutes menit' : '$minutes menit $seconds detik';
+  }
+  final hours = minutes ~/ 60;
+  final remainingMinutes = minutes % 60;
+  return remainingMinutes == 0
+      ? '$hours jam'
+      : '$hours jam $remainingMinutes menit';
+}
+
+String formatLocalClock(DateTime value) {
+  final local = value.toLocal();
+  final hour = local.hour.toString().padLeft(2, '0');
+  final minute = local.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${local.timeZoneName}';
 }
 
 String? validateAttachmentSize(int bytes) =>

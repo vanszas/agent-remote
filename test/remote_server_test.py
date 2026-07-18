@@ -117,6 +117,17 @@ def test_codex_tool_events_are_normalized():
     )
     assert started[0]["type"] == "tool_started"
     assert completed[0]["type"] == "tool_completed"
+    assert completed[0]["text"] == "shell selesai"
+    assert completed[0]["output"] == "clean"
+
+
+def test_completed_reasoning_does_not_claim_task_is_finished():
+    events = remote_server.normalize_codex_event(
+        '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning"}}',
+        "codex",
+    )
+    assert events[0]["text"] == "Analisis tahap selesai"
+    assert events[0]["task_text"] == "Menunggu langkah agent berikutnya"
 
 
 def test_reasoning_events_are_normalized():
@@ -127,7 +138,8 @@ def test_reasoning_events_are_normalized():
     assert events == [{
         "type": "reasoning",
         "agent_id": "codex",
-        "text": "Checking files",
+        "text": "Menganalisis task",
+        "task_text": "Menganalisis task",
         "status": "running",
     }]
 
@@ -141,9 +153,78 @@ def test_runtime_lists_tracked_tasks(tmp_path):
         "session_id": session["id"],
         "title": "Inspect project",
         "status": "running",
+        "createdAt": "2026-07-17T00:00:00+00:00",
         "updatedAt": "2026-07-17T00:00:00+00:00",
     }
     assert runtime.list_tasks()[0]["session_id"] == session["id"]
+
+
+def test_completed_task_reports_frozen_elapsed_seconds(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    runtime = remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+    runtime.tasks["run-1"] = {
+        "id": "run-1",
+        "status": "completed",
+        "createdAt": "2026-07-17T00:00:00+00:00",
+        "updatedAt": "2026-07-17T01:02:03+00:00",
+    }
+    assert runtime.list_tasks()[0]["elapsedSeconds"] == 3723
+
+
+def test_codex_completion_event_becomes_persistent_external_task(monkeypatch, tmp_path):
+    previous = list(remote_server.CODEX_TASKS)
+    monkeypatch.setattr(remote_server, "CODEX_TASKS_FILE", tmp_path / "codex_tasks.json")
+    remote_server.CODEX_TASKS.clear()
+    try:
+        task = remote_server.record_codex_event({
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "cwd": str(tmp_path),
+            "input-messages": ["Commit dan push perubahan"],
+            "last-assistant-message": "Push selesai",
+        })
+        assert task["id"] == "codex_turn-1"
+        assert task["source"] == "codex_desktop"
+        assert task["session_id"] == "thread-1"
+        assert task["title"] == "Commit dan push perubahan"
+        assert task["detail"] == "Push selesai"
+        restored = remote_server.load_codex_tasks()
+        assert restored[0]["id"] == task["id"]
+    finally:
+        remote_server.CODEX_TASKS[:] = previous
+
+
+def test_windows_stop_kills_entire_process_tree(monkeypatch, tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    runtime = remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+    calls = []
+
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.done = False
+
+        def poll(self):
+            return 0 if self.done else None
+
+        def wait(self, timeout):
+            self.done = True
+            return 0
+
+        def kill(self):
+            raise AssertionError("taskkill tree fallback should not be needed")
+
+    monkeypatch.setattr(
+        remote_server.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+    process = FakeProcess()
+    runtime._terminate_process_tree(process, platform_name="nt")
+    assert calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert process.done is True
 
 
 def test_agent_catalog_includes_uninstalled_supported_agents(monkeypatch, tmp_path):

@@ -27,6 +27,24 @@ void main() {
     expect(validateAttachmentSize(15 * 1024 * 1024 + 1), isNotNull);
   });
 
+  test('elapsed duration scales from seconds to minutes and hours', () {
+    expect(formatElapsedDuration(59), '59 detik');
+    expect(formatElapsedDuration(60), '1 menit');
+    expect(formatElapsedDuration(125), '2 menit 5 detik');
+    expect(formatElapsedDuration(3600), '1 jam');
+    expect(formatElapsedDuration(7325), '2 jam 2 menit');
+  });
+
+  test('activity clock follows device timezone', () {
+    final value = DateTime.utc(2026, 7, 18, 8, 30).toLocal();
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    expect(
+      formatLocalClock(DateTime.utc(2026, 7, 18, 8, 30)),
+      '$hour:$minute ${value.timeZoneName}',
+    );
+  });
+
   test('multiline prompt uses first line as title', () async {
     final dir = await Directory.systemTemp.createTemp();
     final connector = DemoAgentConnector(delay: Duration.zero);

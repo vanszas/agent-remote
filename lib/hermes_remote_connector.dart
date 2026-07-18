@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'agent_connector.dart';
+import 'background_task_monitor.dart';
 import 'models.dart';
 
 GitRepositoryStatus decodeGitRepositoryStatus(Map<String, Object?> data) {
@@ -171,6 +172,10 @@ class HermesRemoteConnector
       selectedAgentIds = {preferred?.id ?? installedAgents.first.id};
     }
     coordinatorAgentId = selectedAgentIds.firstOrNull ?? '';
+    await BackgroundTaskMonitor.startCodexSync(
+      tasksUrl: _url('/api/tasks').toString(),
+      token: token,
+    );
     _events.add(const AgentEvent(AgentEventType.connectorReady, sessionId: ''));
   }
 
@@ -372,6 +377,14 @@ class HermesRemoteConnector
     );
     request.contentLength = body.length;
     request.add(body);
+    await BackgroundTaskMonitor.start(
+      tasksUrl: _url('/api/tasks').toString(),
+      stopUrl: _url('/api/sessions/$sessionId/stop').toString(),
+      token: token,
+      sessionId: sessionId,
+      title: text.trim().split('\n').first,
+      agents: agents.join(' + '),
+    );
     final response = await request.close();
     if (response.statusCode != 200) {
       throw StateError(await utf8.decodeStream(response));
@@ -497,6 +510,9 @@ class HermesRemoteConnector
             .toList(),
         workspace: value['workspace'] as String? ?? '',
         permission: value['permission'] as String? ?? '',
+        source: value['source'] as String? ?? 'agent_remote',
+        elapsedSeconds: (value['elapsedSeconds'] as num?)?.toInt() ?? 0,
+        idleSeconds: (value['idleSeconds'] as num?)?.toInt() ?? 0,
         createdAt: DateTime.tryParse(value['createdAt'] as String? ?? ''),
         updatedAt: DateTime.tryParse(value['updatedAt'] as String? ?? ''),
       );

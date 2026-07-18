@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -9,11 +10,13 @@ import 'local_store.dart';
 import 'models.dart';
 import 'connection.dart';
 import 'clipboard_image.dart';
+import 'background_task_monitor.dart';
 import 'credential_store.dart';
 import 'hermes_remote_connector.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await BackgroundTaskMonitor.initialize();
   final c = AppController(DemoAgentConnector(), LocalStore());
   await c.initialize();
   ConnectionCatalog catalog;
@@ -42,9 +45,15 @@ void main() async {
   final profile = connections.defaultProfile;
   final endpoint = profile?.values['endpoint'] as String?;
   if (profile != null && endpoint != null && endpoint.isNotEmpty) {
-    await c.connect(HermesRemoteConnector(Uri.parse(endpoint), ''));
+    final credentials = await CredentialStore().load(profile.id);
+    await c.connect(
+      HermesRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
+    );
     if (!c.isDemo) {
       await c.loadWorkspaces(profile.values['workspacePath'] as String?);
+      await c.restoreLastSession(
+        await BackgroundTaskMonitor.consumeOpenSession(),
+      );
     }
   }
   runApp(HermesRemoteApp(controller: c, connections: connections));
@@ -94,10 +103,47 @@ class HermesRemoteApp extends StatelessWidget {
   );
 }
 
-class AppShell extends StatelessWidget {
+class AppShell extends StatefulWidget {
   const AppShell(this.c, this.connections, {super.key});
   final AppController c;
   final ConnectionSettingsController connections;
+
+  @override
+  State<AppShell> createState() => _AppShellState();
+}
+
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+  StreamSubscription<String>? _notificationSessionSubscription;
+  AppController get c => widget.c;
+  ConnectionSettingsController get connections => widget.connections;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _notificationSessionSubscription = BackgroundTaskMonitor.openedSessions
+        .listen(c.restoreLastSession);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _notificationSessionSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _restoreNotificationSession();
+  }
+
+  Future<void> _restoreNotificationSession() async {
+    final sessionId = await BackgroundTaskMonitor.consumeOpenSession();
+    if (sessionId != null && sessionId.isNotEmpty) {
+      await c.restoreLastSession(sessionId);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (c.takeConnectedNotice()) {
@@ -652,7 +698,7 @@ class ProjectSessionTile extends StatelessWidget {
                   ),
                   if (task != null)
                     Text(
-                      '${task.agents.join(' + ')} - ${_taskPermissionLabel(task.permission)}',
+                      '${task.agents.join(' + ')} - ${_taskPermissionLabel(task.permission)} • ${formatElapsedDuration(task.elapsedSeconds)}',
                       style: Theme.of(context).textTheme.labelSmall,
                     ),
                 ],
@@ -758,7 +804,7 @@ class _ChatScreenState extends State<ChatScreen> {
               c.isDemo
                   ? 'Demo Mode • local only'
                   : c.capabilities.supportsAgentExecution
-                  ? 'Connected • agent runs here'
+                  ? '${s.activeModelName ?? 'PC Agent'} • Connected'
                   : 'Remote composer • sent to PC',
               style: TextStyle(
                 fontSize: 12,
@@ -771,6 +817,8 @@ class _ChatScreenState extends State<ChatScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            if (s.activities.isNotEmpty || s.status == SessionStatus.generating)
+              ActivitySummaryCard(s),
             Expanded(
               child: c.loadingSession
                   ? const Center(child: CircularProgressIndicator())
@@ -1006,6 +1054,155 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
+class ActivitySummaryCard extends StatelessWidget {
+  const ActivitySummaryCard(this.session, {super.key});
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = session.activities.lastOrNull;
+    final running = session.status == SessionStatus.generating;
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      color: running
+          ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .4)
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Icon(
+                  running ? Icons.bolt : Icons.check_circle_outline,
+                  color: running
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.green,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        running ? 'Task sedang berjalan' : 'Aktivitas terakhir',
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      Text(
+                        latest?.detail ?? 'Agent sedang memulai...',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => showActivityTimeline(context, session),
+                  child: const Text('Lihat proses'),
+                ),
+              ],
+            ),
+            if (running) const LinearProgressIndicator(minHeight: 3),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showActivityTimeline(
+  BuildContext context,
+  AgentSession session,
+) => showModalBottomSheet<void>(
+  context: context,
+  isScrollControlled: true,
+  builder: (context) => SafeArea(
+    child: SizedBox(
+      height: MediaQuery.sizeOf(context).height * .72,
+      child: Column(
+        children: [
+          ListTile(
+            title: const Text('Proses task'),
+            subtitle: Text(session.activeModelName ?? 'PC Agent'),
+            trailing: IconButton(
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: session.activities.isEmpty
+                ? const Center(child: Text('Belum ada aktivitas'))
+                : ListView.builder(
+                    itemCount: session.activities.length,
+                    itemBuilder: (context, index) {
+                      final activity = session.activities[index];
+                      final legacyOutput = activity.detail.length > 300
+                          ? activity.detail
+                          : '';
+                      final output = activity.output.isNotEmpty
+                          ? activity.output
+                          : legacyOutput;
+                      final detail = legacyOutput.isNotEmpty
+                          ? '${activity.toolName.isEmpty ? 'Tool' : activity.toolName} selesai'
+                          : activity.detail;
+                      final displayKind = activity.toolName == 'shell'
+                          ? 'running_command'
+                          : activity.kind;
+                      if (output.isNotEmpty) {
+                        return ExpansionTile(
+                          leading: Icon(_activityIcon(displayKind)),
+                          title: Text(_activityTitle(displayKind)),
+                          subtitle: Text(detail),
+                          trailing: Text(formatLocalClock(activity.createdAt)),
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(72, 0, 20, 16),
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: SelectableText(output),
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      return ListTile(
+                        leading: Icon(_activityIcon(displayKind)),
+                        title: Text(_activityTitle(displayKind)),
+                        subtitle: SelectableText(detail),
+                        trailing: Text(formatLocalClock(activity.createdAt)),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    ),
+  ),
+);
+
+IconData _activityIcon(String kind) => switch (kind) {
+  'queued' => Icons.schedule,
+  'thinking' => Icons.psychology_outlined,
+  'editing' => Icons.edit_outlined,
+  'testing' => Icons.science_outlined,
+  'running_command' => Icons.terminal,
+  'completed' => Icons.check_circle_outline,
+  'failed' => Icons.error_outline,
+  _ => Icons.sync,
+};
+
+String _activityTitle(String kind) => switch (kind) {
+  'queued' => 'Masuk antrean',
+  'thinking' => 'Menganalisis',
+  'editing' => 'Mengubah file',
+  'testing' => 'Menjalankan verifikasi',
+  'running_command' => 'Menjalankan command',
+  'completed' => 'Selesai',
+  'failed' => 'Gagal',
+  _ => 'Aktivitas agent',
+};
+
 class _RunningAgentCard extends StatelessWidget {
   const _RunningAgentCard();
   @override
@@ -1216,7 +1413,9 @@ class _TasksPageState extends State<TasksPage> {
           ...c.tasks.map(
             (task) => Card(
               child: ListTile(
-                onTap: task.sessionId.isEmpty ? null : () => c.openTask(task),
+                onTap: task.sessionId.isEmpty || task.source != 'agent_remote'
+                    ? null
+                    : () => c.openTask(task),
                 leading: task.status == 'running'
                     ? const SizedBox.square(
                         dimension: 24,
@@ -1233,10 +1432,20 @@ class _TasksPageState extends State<TasksPage> {
                 subtitle: Text(
                   [
                     task.agents.join(' + '),
+                    task.source == 'codex_desktop'
+                        ? 'Codex Desktop/CLI'
+                        : 'Agent Remote',
                     task.detail,
+                    if (task.source == 'codex_desktop' &&
+                        task.updatedAt != null)
+                      'Selesai ${formatLocalClock(task.updatedAt!)}'
+                    else if (task.createdAt != null)
+                      'Mulai ${formatLocalClock(task.createdAt!)} • ${formatElapsedDuration(task.elapsedSeconds)}',
+                    if (task.status == 'running' && task.idleSeconds >= 15)
+                      'Belum ada event baru selama ${formatElapsedDuration(task.idleSeconds)}',
                     task.workspace,
                   ].where((value) => value.isNotEmpty).join('\n'),
-                  maxLines: 3,
+                  maxLines: 5,
                   overflow: TextOverflow.ellipsis,
                 ),
                 trailing: Chip(label: Text(task.status)),

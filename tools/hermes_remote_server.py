@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,16 +23,23 @@ from agent_runtime import (
     SessionStore,
     available_agents as discover_agents,
     normalize_codex_event,
+    now_iso,
 )
 
-HOST = os.environ.get("HERMES_REMOTE_HOST", "127.0.0.1")
+HOST = os.environ.get("AGENT_REMOTE_HOST") or os.environ.get(
+    "HERMES_REMOTE_HOST", "0.0.0.0"
+)
 PORT = 9120
 STATE_ROOT = Path(
     os.environ.get("LOCALAPPDATA", Path.home() / ".agent-remote")
 ) / "AgentRemote"
 STATE_FILE = STATE_ROOT / "server.json"
+BRIDGE_FILE = STATE_ROOT / "bridge.json"
+CODEX_TASKS_FILE = STATE_ROOT / "codex_tasks.json"
 HERMES = Path(r"C:\Users\ADMIN\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe")
-TOKEN = os.environ.get("HERMES_REMOTE_TOKEN", "")
+TOKEN = os.environ.get("AGENT_REMOTE_TOKEN") or os.environ.get(
+    "HERMES_REMOTE_TOKEN", "admin"
+)
 SKIP = {".git", ".dart_tool", "build", ".idea", ".vs", ".hermes-remote"}
 
 
@@ -51,6 +60,97 @@ def save_server_state(workspace: Path, recent: list[str]):
         "permission_by_workspace": PERMISSION_BY_WORKSPACE,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(STATE_FILE)
+
+
+def save_bridge_config():
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = BRIDGE_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps({
+        "endpoint": f"http://127.0.0.1:{PORT}/api/codex-events",
+        "token": TOKEN,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(BRIDGE_FILE)
+
+
+def load_codex_tasks() -> list[dict]:
+    try:
+        value = json.loads(CODEX_TASKS_FILE.read_text(encoding="utf-8"))
+        return [item for item in value if isinstance(item, dict) and item.get("id")]
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return []
+
+
+CODEX_TASKS_LOCK = threading.RLock()
+CODEX_TASKS = load_codex_tasks()
+
+
+def save_codex_tasks():
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = CODEX_TASKS_FILE.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(CODEX_TASKS[:200], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(CODEX_TASKS_FILE)
+
+
+def record_codex_event(payload: dict) -> dict:
+    event_type = str(payload.get("type") or "agent-turn-complete")
+    if event_type not in {"agent-turn-complete", "turn.completed", "turn/completed"}:
+        raise ValueError("unsupported Codex event")
+    thread_id = str(
+        payload.get("thread-id")
+        or payload.get("thread_id")
+        or payload.get("threadId")
+        or payload.get("conversation-id")
+        or ""
+    )
+    turn_id = str(payload.get("turn-id") or payload.get("turn_id") or payload.get("turnId") or "")
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:20]
+    task_id = f"codex_{turn_id or fingerprint}"
+    input_messages = payload.get("input-messages") or payload.get("input_messages") or []
+    title = next(
+        (str(value).strip() for value in reversed(input_messages) if str(value).strip()),
+        "Codex task",
+    )[:120]
+    detail = str(
+        payload.get("last-assistant-message")
+        or payload.get("last_assistant_message")
+        or "Task Codex selesai"
+    ).strip()
+    timestamp = now_iso()
+    task = {
+        "id": task_id,
+        "session_id": thread_id,
+        "title": title,
+        "status": "completed",
+        "detail": detail[:500] or "Task Codex selesai",
+        "agents": ["codex"],
+        "mode": "single",
+        "source": "codex_desktop",
+        "permission": "",
+        "workspace": str(payload.get("cwd") or payload.get("workspace") or ""),
+        "changedFiles": int(payload.get("changed-files") or payload.get("changed_files") or 0),
+        "elapsedSeconds": int(payload.get("elapsed-seconds") or payload.get("elapsed_seconds") or 0),
+        "idleSeconds": 0,
+        "createdAt": str(payload.get("started-at") or payload.get("started_at") or timestamp),
+        "updatedAt": timestamp,
+    }
+    with CODEX_TASKS_LOCK:
+        CODEX_TASKS[:] = [item for item in CODEX_TASKS if item.get("id") != task_id]
+        CODEX_TASKS.insert(0, task)
+        del CODEX_TASKS[200:]
+        save_codex_tasks()
+    return task
+
+
+def list_all_tasks() -> list[dict]:
+    with CODEX_TASKS_LOCK:
+        external = json.loads(json.dumps(CODEX_TASKS))
+    values = RUNTIME.list_tasks() + external
+    return sorted(values, key=lambda item: item.get("updatedAt", ""), reverse=True)[:200]
 
 
 SERVER_STATE = load_server_state()
@@ -410,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/agents":
                 return self._json(HTTPStatus.OK, {"agents": available_agents()})
             if url.path == "/api/tasks":
-                return self._json(HTTPStatus.OK, {"tasks": RUNTIME.list_tasks()})
+                return self._json(HTTPStatus.OK, {"tasks": list_all_tasks()})
             if url.path == "/api/folders":
                 return self._json(
                     HTTPStatus.OK,
@@ -438,6 +538,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         try:
+            if self.path == "/api/codex-events":
+                return self._json(
+                    HTTPStatus.CREATED,
+                    {"task": record_codex_event(self._payload())},
+                )
             if self.path == "/api/sessions":
                 payload = self._payload()
                 session = STORE.create(
@@ -582,7 +687,53 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "session not found"})
 
 
+def _forward_computer_use_notification(payload: str) -> None:
+    runtime_root = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "runtimes" / "cua_node"
+    candidates = list(runtime_root.glob(
+        "*/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe"
+    ))
+    if not candidates:
+        return
+    executable = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+    try:
+        subprocess.run(
+            [str(executable), "turn-ended", payload],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def run_codex_notify_bridge(arguments: list[str]) -> None:
+    if not arguments:
+        return
+    payload_text = arguments[-1]
+    _forward_computer_use_notification(payload_text)
+    try:
+        payload = json.loads(payload_text)
+        bridge = json.loads(BRIDGE_FILE.read_text(encoding="utf-8"))
+        request = urllib.request.Request(
+            str(bridge["endpoint"]),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {bridge['token']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=8):
+            pass
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        pass
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--codex-notify":
+        run_codex_notify_bridge(sys.argv[2:])
+        return
+    save_bridge_config()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

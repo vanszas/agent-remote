@@ -11,6 +11,30 @@ class LocalStore {
       _directory ?? await getApplicationSupportDirectory();
   Future<File> get _file async =>
       File('${(await directory).path}${Platform.pathSeparator}sessions.json');
+  Future<File> get _uiFile async =>
+      File('${(await directory).path}${Platform.pathSeparator}ui-state.json');
+
+  Future<AppUiState> loadUiState() async {
+    try {
+      final file = await _uiFile;
+      if (!await file.exists()) return const AppUiState();
+      return AppUiState.fromJson(
+        Map<String, Object?>.from(jsonDecode(await file.readAsString()) as Map),
+      );
+    } catch (_) {
+      return const AppUiState();
+    }
+  }
+
+  Future<void> saveUiState(AppUiState state) async {
+    final file = await _uiFile;
+    await file.parent.create(recursive: true);
+    final temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(jsonEncode(state.toJson()), flush: true);
+    if (await file.exists()) await file.delete();
+    await temporary.rename(file.path);
+  }
+
   Future<List<AgentSession>> load() async {
     final f = await _file;
     try {
@@ -81,4 +105,22 @@ class LocalStore {
       '${dir.path}${Platform.pathSeparator}${generatedId}_${sanitizeFilename(source.uri.pathSegments.last)}',
     );
   }
+}
+
+class AppUiState {
+  const AppUiState({this.sessionId, this.workspacePath, this.page = 0});
+  final String? sessionId, workspacePath;
+  final int page;
+
+  Map<String, Object?> toJson() => {
+    'sessionId': sessionId,
+    'workspacePath': workspacePath,
+    'page': page,
+  };
+
+  factory AppUiState.fromJson(Map<String, Object?> json) => AppUiState(
+    sessionId: json['sessionId'] as String?,
+    workspacePath: json['workspacePath'] as String?,
+    page: (json['page'] as num?)?.toInt() ?? 0,
+  );
 }

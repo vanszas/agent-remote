@@ -57,3 +57,9 @@ app.*.map.json
 graphify-out/
 tmp/
 temp/
+# Agent Remote local runtime data
+.agent-remote/
+.hermes-remote/
+dist/
+verification-logs/
+window.xml

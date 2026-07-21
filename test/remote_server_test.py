@@ -1,5 +1,7 @@
 import importlib.util
+import io
 import json
+import queue
 import sqlite3
 import threading
 import urllib.error
@@ -20,6 +22,77 @@ def test_parse_git_status_maps_core_states():
         {"path": "lib/new.dart", "status": "added"},
         {"path": "old.txt", "status": "deleted"},
         {"path": "note.txt", "status": "untracked"},
+    ]
+
+
+def test_computer_use_notification_runs_without_console(monkeypatch, tmp_path):
+    executable = tmp_path / "codex-computer-use.exe"
+    executable.write_bytes(b"stub")
+    calls = []
+
+    monkeypatch.setattr(remote_server.Path, "glob", lambda _self, _pattern: [executable])
+    monkeypatch.setattr(
+        remote_server.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    remote_server._forward_computer_use_notification('{"type":"turn-ended"}')
+
+    assert calls[0][1]["creationflags"] == remote_server.CREATE_NO_WINDOW
+
+
+def test_git_status_reuses_short_cache(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_git(_workspace, *arguments, **_kwargs):
+        calls.append(arguments)
+        if arguments[:2] == ("status", "--porcelain=v1"):
+            return remote_server.subprocess.CompletedProcess(arguments, 0, " M lib/a.dart\0", "")
+        if arguments[:2] == ("diff", "--numstat"):
+            return remote_server.subprocess.CompletedProcess(arguments, 0, "4\t2\tlib/a.dart\n", "")
+        if arguments[:2] == ("branch", "--show-current"):
+            return remote_server.subprocess.CompletedProcess(arguments, 0, "main\n", "")
+        if arguments[:3] == ("remote", "get-url", "origin"):
+            return remote_server.subprocess.CompletedProcess(
+                arguments, 0, "https://github.com/example/repo.git\n", ""
+            )
+        return remote_server.subprocess.CompletedProcess(arguments, 1, "", "")
+
+    monkeypatch.setattr(remote_server, "_git", fake_git)
+    monkeypatch.setattr(
+        remote_server,
+        "github_cli_status",
+        lambda: {"installed": True, "authenticated": True, "user": "example"},
+    )
+    remote_server.GIT_STATUS_CACHE.clear()
+    remote_server.GIT_REMOTE_CACHE.clear()
+
+    first = remote_server.git_status(tmp_path)
+    first_call_count = len(calls)
+    second = remote_server.git_status(tmp_path)
+
+    assert first["is_git_repo"] is True
+    assert second == first
+    assert len(calls) == first_call_count
+
+
+def test_non_repo_reports_nested_git_roots(monkeypatch, tmp_path):
+    nested = tmp_path / "Apps" / "AgentRemote"
+    (nested / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        remote_server,
+        "_git",
+        lambda *_args, **_kwargs: remote_server.subprocess.CompletedProcess([], 1, "", ""),
+    )
+    remote_server.GIT_STATUS_CACHE.clear()
+    remote_server.GIT_DISCOVERY_CACHE.clear()
+
+    status = remote_server.git_status(tmp_path)
+
+    assert status["is_git_repo"] is False
+    assert status["nested_repositories"] == [
+        {"name": "AgentRemote", "path": str(nested.resolve())}
     ]
 
 
@@ -99,6 +172,11 @@ def test_provider_usage_reads_9router_metrics_without_secrets(tmp_path):
     assert usage["models"] == ["gpt-5.6-sol", "opus"]
     assert "apiKey" not in usage["recent"][0]
     assert "connectionId" not in usage["recent"][0]
+
+
+def test_quota_reset_at_normalizes_unix_seconds():
+    assert remote_server._quota_reset_at(1784961358) == "2026-07-25T06:35:58Z"
+    assert remote_server._quota_reset_at("2026-07-25T06:35:58Z") == "2026-07-25T06:35:58Z"
 
 
 def test_provider_usage_filters_agent_remote_mobile_key(tmp_path):
@@ -190,6 +268,7 @@ def test_provider_usage_filters_agent_remote_mobile_key(tmp_path):
 def test_agent_environment_uses_mobile_key_only_for_codex(monkeypatch):
     monkeypatch.setenv('AGENT_REMOTE_9ROUTER_MOBILE_KEY', 'sk-mobile')
     assert remote_server.agent_environment('codex') == {
+        'AGENT_REMOTE_9ROUTER_API_KEY': 'sk-mobile',
         'NINE_ROUTER_API_KEY': 'sk-mobile'
     }
     assert remote_server.agent_environment('claude') == {}
@@ -273,6 +352,27 @@ def test_workspace_store_keeps_sessions_separate(tmp_path):
     assert not (second / ".agent-remote" / "sessions.json").exists()
 
 
+def test_session_summaries_exclude_heavy_history(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    session = store.create(workspace_path=str(tmp_path))
+    store.append_message(session["id"], "user", "Inspect repository")
+    store.append_activity(
+        session["id"],
+        "run-1",
+        "codex",
+        "command",
+        "completed",
+        "git status",
+        output="large output",
+    )
+
+    summary = store.list_summaries()[0]
+
+    assert summary["messageCount"] == 1
+    assert "messages" not in summary
+    assert "activities" not in summary
+
+
 def test_workspace_selection_accepts_arbitrary_folder_and_lists_projects(
     monkeypatch, tmp_path
 ):
@@ -312,9 +412,20 @@ def test_session_store_persists_history(tmp_path):
 
 def test_codex_command_allows_non_git_workspace(monkeypatch):
     monkeypatch.setattr(remote_server.shutil, "which", lambda _: "codex.exe")
+    monkeypatch.setenv('AGENT_REMOTE_9ROUTER_MOBILE_KEY', 'sk-mobile')
     command = remote_server.codex_command("inspect", "", [])
     assert "--skip-git-repo-check" in command
     assert command[command.index("-C") + 1] == str(remote_server.WORKSPACE)
+    assert 'model_provider="9router"' in command
+    assert 'model_providers.9router.name="9Router"' in command
+    assert (
+        'model_providers.9router.base_url="http://127.0.0.1:20128/v1"'
+        in command
+    )
+    assert (
+        'model_providers.9router.env_key="AGENT_REMOTE_9ROUTER_API_KEY"'
+        in command
+    )
 
 
 def test_codex_command_applies_selected_permission(monkeypatch):
@@ -356,6 +467,79 @@ def test_codex_json_scalar_output_does_not_crash_event_stream():
     }]
 
 
+def test_codex_plain_text_output_is_diagnostic_not_answer():
+    events = remote_server.normalize_codex_event(
+        'Reading additional input from stdin...',
+        'codex',
+    )
+    assert events == [{
+        'type': 'diagnostic',
+        'agent_id': 'codex',
+        'text': 'Reading additional input from stdin...',
+    }]
+
+
+def test_runtime_keeps_codex_stderr_out_of_assistant_response(
+    monkeypatch,
+    tmp_path,
+):
+    store = remote_server.SessionStore(tmp_path / 'sessions.json', 'Workspace')
+    session = store.create()
+    popen_kwargs = {}
+
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self, *args, **kwargs):
+            popen_kwargs.update(kwargs)
+            self.stdout = io.StringIO(
+                '{"type":"item.completed","item":'
+                '{"type":"agent_message","text":"Jawaban bersih"}}\n'
+            )
+            self.stderr = io.StringIO(
+                'Reading additional input from stdin...\n'
+                '2026-07-18T17:17:37Z WARN codex_core::config: startup warning\n'
+            )
+
+        def wait(self, timeout):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(remote_server.subprocess, 'Popen', FakeProcess)
+    runtime = remote_server.AgentRuntime(store, lambda *_: ['codex'], tmp_path)
+    runtime.tasks['run-1'] = {
+        'id': 'run-1',
+        'status': 'running',
+        'createdAt': '2026-07-18T17:17:36+00:00',
+        'updatedAt': '2026-07-18T17:17:36+00:00',
+        'agentStates': [{'id': 'codex', 'status': 'queued'}],
+    }
+
+    result = runtime._run_agent(
+        'run-1',
+        session['id'],
+        'codex',
+        'Kerjakan task',
+        '',
+        [],
+        'workspace',
+        queue.Queue(),
+    )
+
+    assert result == 'Jawaban bersih'
+    assert popen_kwargs['creationflags'] & 0x08000000
+    assert 'WARN' not in result
+    diagnostics = [
+        activity
+        for activity in store.get(session['id'])['activities']
+        if activity['kind'] == 'diagnostic'
+    ]
+    assert len(diagnostics) == 1
+    assert 'startup warning' in diagnostics[0]['output']
+
+
 def test_completed_reasoning_does_not_claim_task_is_finished():
     events = remote_server.normalize_codex_event(
         '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning"}}',
@@ -392,6 +576,68 @@ def test_runtime_lists_tracked_tasks(tmp_path):
         "updatedAt": "2026-07-17T00:00:00+00:00",
     }
     assert runtime.list_tasks()[0]["session_id"] == session["id"]
+
+
+def test_runtime_queues_agents_above_global_limit(monkeypatch, tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    runtime = remote_server.AgentRuntime(
+        store,
+        lambda *_: [],
+        tmp_path,
+        max_concurrent_agents=1,
+    )
+    for run_id, agent_id in (("run-1", "codex"), ("run-2", "claude")):
+        runtime.tasks[run_id] = {
+            "id": run_id,
+            "status": "running",
+            "createdAt": "2026-07-17T00:00:00+00:00",
+            "updatedAt": "2026-07-17T00:00:00+00:00",
+            "agentStates": [{"id": agent_id, "status": "queued"}],
+        }
+
+    lock = threading.Lock()
+    release = threading.Event()
+    entered = threading.Event()
+    active = 0
+    peak = 0
+    results = []
+
+    def fake_run(run_id, _session_id, agent_id, *_args):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            entered.set()
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return agent_id
+
+    monkeypatch.setattr(runtime, "_run_agent_process", fake_run)
+    first = threading.Thread(
+        target=lambda: results.append(
+            runtime._run_agent("run-1", "session-1", "codex", "", "", [], "workspace", queue.Queue())
+        )
+    )
+    second = threading.Thread(
+        target=lambda: results.append(
+            runtime._run_agent("run-2", "session-2", "claude", "", "", [], "workspace", queue.Queue())
+        )
+    )
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    threading.Event().wait(0.1)
+
+    assert second.is_alive()
+    assert runtime.list_tasks()[1]["agentStates"][0]["phase"] == "queued"
+
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert peak == 1
+    assert sorted(results) == ["claude", "codex"]
 
 
 def test_completed_task_reports_frozen_elapsed_seconds(tmp_path):
@@ -493,10 +739,12 @@ def test_coordinator_tracks_roles_without_extra_agent_processes(monkeypatch, tmp
         [],
         "workspace",
         remote_server.queue.Queue(),
+        1,
     )
     task = runtime.list_tasks()[0]
     states = {state["id"]: state for state in task["agentStates"]}
     assert len(commands) == 2
+    assert task["concurrency"] == 1
     assert states["codex"]["role"] == "coordinator"
     assert states["claude"]["role"] == "worker"
     assert {state["status"] for state in states.values()} == {"completed"}
@@ -524,6 +772,210 @@ def test_codex_completion_event_becomes_persistent_external_task(monkeypatch, tm
         assert restored[0]["id"] == task["id"]
     finally:
         remote_server.CODEX_TASKS[:] = previous
+
+
+def test_codex_rollout_running_task_is_visible_in_process_page(tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("\n".join(json.dumps(row) for row in [
+        {"timestamp": "2026-07-19T11:00:00Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-live"}},
+        {"timestamp": "2026-07-19T11:00:01Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Perbaiki backend"}},
+        {"timestamp": "2026-07-19T11:00:05Z", "type": "event_msg", "payload": {"type": "agent_reasoning", "text": "Menganalisis source"}},
+    ]), encoding="utf-8")
+    database = tmp_path / "state.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, title TEXT, model TEXT, model_provider TEXT, archived INTEGER, updated_at_ms INTEGER)")
+    connection.execute(
+        "INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)",
+        ["thread-live", str(rollout), str(tmp_path), "Fallback", "gpt-5.6-sol", "9router", 0, 1],
+    )
+    connection.commit()
+    connection.close()
+
+    tasks = remote_server.list_codex_desktop_tasks(
+        database,
+        now=datetime(2026, 7, 19, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert tasks[0]["id"] == "codex_turn-live"
+    assert tasks[0]["status"] == "running"
+    assert tasks[0]["title"] == "Perbaiki backend"
+    assert "gpt-5.6-sol via 9router" in tasks[0]["detail"]
+
+
+def test_codex_rollout_cache_only_reads_changed_file(monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("\n".join(json.dumps(row) for row in [
+        {"timestamp": "2026-07-19T11:00:00Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-cache"}},
+        {"timestamp": "2026-07-19T11:00:01Z", "type": "event_msg", "payload": {"type": "agent_reasoning", "text": "Menganalisis source"}},
+    ]), encoding="utf-8")
+    original = remote_server._rollout_tail
+    calls = []
+
+    def tracked(path, maximum_bytes=remote_server.CODEX_ROLLOUT_TAIL_BYTES):
+        calls.append(path)
+        return original(path, maximum_bytes)
+
+    remote_server.CODEX_ROLLOUT_CACHE.clear()
+    monkeypatch.setattr(remote_server, "_rollout_tail", tracked)
+    assert remote_server._cached_codex_turn(rollout)["detail"] == "Menganalisis source"
+    assert remote_server._cached_codex_turn(rollout)["detail"] == "Menganalisis source"
+    rollout.write_text(
+        rollout.read_text(encoding="utf-8")
+        + "\n"
+        + json.dumps({"timestamp": "2026-07-19T11:00:02Z", "type": "event_msg", "payload": {"type": "agent_reasoning", "text": "Menjalankan test"}}),
+        encoding="utf-8",
+    )
+    assert remote_server._cached_codex_turn(rollout)["detail"] == "Menjalankan test"
+    assert len(calls) == 2
+
+
+def test_codex_active_task_outside_previous_thirty_thread_window_is_visible(tmp_path):
+    rollout = tmp_path / "active-rollout.jsonl"
+    rollout.write_text("\n".join(json.dumps(row) for row in [
+        {"timestamp": "2026-07-19T11:00:00Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-old-folder"}},
+        {"timestamp": "2026-07-19T11:00:01Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Task folder lain"}},
+    ]), encoding="utf-8")
+    database = tmp_path / "state.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, title TEXT, model TEXT, model_provider TEXT, archived INTEGER, updated_at_ms INTEGER)")
+    for index in range(35):
+        connection.execute(
+            "INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)",
+            [f"newer-{index}", str(tmp_path / f"missing-{index}.jsonl"), str(tmp_path / f"folder-{index}"), "Newer", "gpt-5.6-sol", "9router", 0, 1000 - index],
+        )
+    connection.execute(
+        "INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)",
+        ["thread-old-folder", str(rollout), str(tmp_path / "old-folder"), "Fallback", "gpt-5.6-sol", "9router", 0, 1],
+    )
+    connection.commit()
+    connection.close()
+
+    tasks = remote_server.list_codex_desktop_tasks(
+        database,
+        now=datetime(2026, 7, 19, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert [task["id"] for task in tasks] == ["codex_turn-old-folder"]
+    assert tasks[0]["workspace"] == str(tmp_path / "old-folder")
+
+
+def test_pc_agent_process_detection_handles_wrappers_and_ignores_idle_codex_app():
+    assert remote_server._process_agent_id({
+        "executable": "node.exe",
+        "path": r"C:\Program Files\nodejs\node.exe",
+        "command_line": r"node C:\npm\node_modules\@anthropic-ai\claude-code\cli.js",
+    }) == "claude"
+    assert remote_server._process_agent_id({
+        "executable": "codex.exe",
+        "path": r"C:\Tools\codex.exe",
+        "command_line": r"codex.exe exec --json task",
+    }) == "codex"
+    assert remote_server._process_agent_id({
+        "executable": "codex.exe",
+        "path": r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0\codex.exe",
+        "command_line": r"codex.exe app-server",
+    }) == ""
+
+
+def test_pc_agent_process_becomes_recent_completion(monkeypatch):
+    rows = [{
+        "pid": 42,
+        "executable": "node.exe",
+        "path": r"C:\Program Files\nodejs\node.exe",
+        "command_line": r"node C:\npm\node_modules\@google\gemini-cli\index.js",
+        "created_at": "2026-07-19T11:00:00+00:00",
+    }]
+    monkeypatch.setattr(remote_server, "_windows_process_rows", lambda: list(rows))
+    remote_server.PC_AGENT_ACTIVE.clear()
+    remote_server.PC_AGENT_RECENT.clear()
+    remote_server.PC_AGENT_PROCESS_CACHE = None
+
+    running = remote_server.list_pc_agent_tasks()
+    assert running[0]["agents"] == ["gemini"]
+    assert running[0]["status"] == "running"
+
+    rows.clear()
+    remote_server.PC_AGENT_PROCESS_CACHE = None
+    completed = remote_server.list_pc_agent_tasks()
+    assert completed[0]["agents"] == ["gemini"]
+    assert completed[0]["status"] == "completed"
+
+
+def test_task_list_prioritizes_active_and_caps_history_at_ten(monkeypatch):
+    completed = [{
+        "id": f"completed-{index}",
+        "status": "completed",
+        "agents": ["codex"],
+        "updatedAt": f"2026-07-19T11:{index:02d}:00+00:00",
+    } for index in range(12)]
+    running = {
+        "id": "running-old-folder",
+        "status": "running",
+        "agents": ["claude"],
+        "updatedAt": "2026-07-19T10:00:00+00:00",
+    }
+    previous = list(remote_server.CODEX_TASKS)
+    remote_server.CODEX_TASKS.clear()
+    remote_server.TASK_LIST_CACHE = None
+    monkeypatch.setattr(remote_server, "list_codex_desktop_tasks", lambda: [*completed, running])
+    monkeypatch.setattr(remote_server.RUNTIME, "list_tasks", lambda: [])
+    monkeypatch.setattr(remote_server, "list_pc_agent_tasks", lambda: [])
+    try:
+        tasks = remote_server.list_all_tasks()
+    finally:
+        remote_server.CODEX_TASKS[:] = previous
+        remote_server.TASK_LIST_CACHE = None
+
+    assert len(tasks) == 10
+    assert tasks[0]["id"] == "running-old-folder"
+
+
+def test_server_instance_mutex_rejects_second_windows_server():
+    if remote_server.os.name != "nt":
+        return
+    name = f"Local\\AgentRemoteTest-{remote_server.time.time_ns()}"
+    first = remote_server.acquire_server_instance(name)
+    try:
+        assert first is not None
+        assert remote_server.acquire_server_instance(name) is None
+    finally:
+        remote_server.release_server_instance(first)
+
+
+def test_codex_rollout_without_terminal_event_stops_after_inactivity(tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("\n".join(json.dumps(row) for row in [
+        {"timestamp": "2026-07-19T11:00:00Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-stale"}},
+        {"timestamp": "2026-07-19T11:00:05Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "Hasil selesai"}},
+    ]), encoding="utf-8")
+    database = tmp_path / "state.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, title TEXT, model TEXT, model_provider TEXT, archived INTEGER, updated_at_ms INTEGER)")
+    connection.execute(
+        "INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)",
+        ["thread-stale", str(rollout), str(tmp_path), "Task stale", "gpt-5.6-sol", "9router", 0, 1],
+    )
+    connection.commit()
+    connection.close()
+
+    task = remote_server.list_codex_desktop_tasks(
+        database,
+        now=datetime(2026, 7, 19, 11, 20, tzinfo=timezone.utc),
+    )[0]
+
+    assert task["status"] == "stopped"
+    assert task["activeAgent"] == ""
+    assert task["agentStates"][0]["completedAt"] == "2026-07-19T11:00:05Z"
+
+
+def test_runtime_recovers_generating_session_after_server_restart(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "Workspace")
+    session = store.create()
+    store.update(session["id"], status="generating")
+
+    remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+
+    assert store.get(session["id"])["status"] == "stopped"
 
 
 def test_windows_stop_kills_entire_process_tree(monkeypatch, tmp_path):

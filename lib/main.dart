@@ -15,49 +15,215 @@ import 'background_task_monitor.dart';
 import 'credential_store.dart';
 import 'hermes_remote_connector.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await BackgroundTaskMonitor.initialize();
-  final c = AppController(DemoAgentConnector(), LocalStore());
-  await c.initialize();
-  ConnectionCatalog catalog;
-  String? catalogError;
-  try {
-    catalog = await ConnectionCatalog.loadAsset();
-  } catch (_) {
-    catalog = const ConnectionCatalog(1, []);
-    catalogError = 'Connection catalog could not be loaded.';
+  runApp(const AgentRemoteBootstrap());
+}
+
+class AgentRemoteBootstrap extends StatefulWidget {
+  const AgentRemoteBootstrap({super.key});
+
+  @override
+  State<AgentRemoteBootstrap> createState() => _AgentRemoteBootstrapState();
+}
+
+class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
+  late final AppController controller;
+  ConnectionSettingsController? connections;
+  String stage = 'Menyiapkan Agent Remote';
+  String detail = 'Memulai komponen aplikasi';
+  double progress = .06;
+  bool ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    controller = AppController(DemoAgentConnector(), LocalStore());
+    unawaited(_bootstrap());
   }
-  final connectionStore = ConnectionProfileStore();
-  var connections = ConnectionSettingsController(
-    catalog,
-    connectionStore,
-    error: catalogError,
-  );
-  try {
-    await connections.initialize();
-  } catch (_) {
-    connections = ConnectionSettingsController(
+
+  void _setStage(String nextStage, String nextDetail, double nextProgress) {
+    if (!mounted) return;
+    setState(() {
+      stage = nextStage;
+      detail = nextDetail;
+      progress = nextProgress;
+    });
+  }
+
+  Future<void> _bootstrap() async {
+    _setStage('Menyiapkan notifikasi', 'Mengaktifkan monitor background', .12);
+    try {
+      await BackgroundTaskMonitor.initialize();
+    } catch (_) {}
+    _setStage('Memuat aplikasi', 'Membaca session dan folder terakhir', .24);
+    try {
+      await controller.initialize();
+    } catch (error) {
+      controller.connectorError = connectionErrorMessage(error);
+    }
+
+    ConnectionCatalog catalog;
+    String? catalogError;
+    _setStage('Memuat koneksi', 'Membaca profil PC tersimpan', .36);
+    try {
+      catalog = await ConnectionCatalog.loadAsset();
+    } catch (_) {
+      catalog = const ConnectionCatalog(1, []);
+      catalogError = 'Connection catalog could not be loaded.';
+    }
+    final connectionStore = ConnectionProfileStore();
+    var settings = ConnectionSettingsController(
       catalog,
       connectionStore,
-      error: 'Connection settings could not be loaded.',
+      error: catalogError,
     );
-  }
-  final profile = connections.defaultProfile;
-  final endpoint = profile?.values['endpoint'] as String?;
-  if (profile != null && endpoint != null && endpoint.isNotEmpty) {
-    final credentials = await CredentialStore().load(profile.id);
-    await c.connect(
-      HermesRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
-    );
-    if (!c.isDemo) {
-      await c.loadWorkspaces(profile.values['workspacePath'] as String?);
-      await c.restoreLastSession(
-        await BackgroundTaskMonitor.consumeOpenSession(),
+    try {
+      await settings.initialize();
+    } catch (_) {
+      settings = ConnectionSettingsController(
+        catalog,
+        connectionStore,
+        error: 'Connection settings could not be loaded.',
       );
     }
+    connections = settings;
+
+    final profile = settings.defaultProfile;
+    final endpoint = profile?.values['endpoint'] as String?;
+    if (profile != null && endpoint != null && endpoint.isNotEmpty) {
+      try {
+        _setStage('Menghubungkan PC', endpoint, .52);
+        final credentials = await CredentialStore().load(profile.id);
+        await controller.connect(
+          HermesRemoteConnector(
+            Uri.parse(endpoint),
+            credentials?.password ?? '',
+          ),
+        );
+        if (!controller.isDemo) {
+          _setStage('Memuat workspace', 'Mengembalikan folder terakhir', .70);
+          await controller.loadWorkspaces(
+            profile.values['workspacePath'] as String?,
+          );
+          _setStage('Sinkron task', 'Memuat session dan proses aktif', .88);
+          await controller.restoreLastSession(
+            await BackgroundTaskMonitor.consumeOpenSession(),
+          );
+        }
+      } catch (error) {
+        controller.connectorError = connectionErrorMessage(error);
+      }
+    }
+    _setStage('Siap', 'Agent Remote siap digunakan', 1);
+    if (mounted) setState(() => ready = true);
   }
-  runApp(HermesRemoteApp(controller: c, connections: connections));
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = connections;
+    if (ready && settings != null) {
+      return HermesRemoteApp(controller: controller, connections: settings);
+    }
+    return MaterialApp(
+      title: 'Agent Remote',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorSchemeSeed: Colors.indigo,
+        useMaterial3: true,
+        cardTheme: const CardThemeData(
+          elevation: 0,
+          margin: EdgeInsets.symmetric(vertical: 4),
+        ),
+        appBarTheme: const AppBarTheme(surfaceTintColor: Colors.transparent),
+      ),
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        colorSchemeSeed: const Color(0xFF9DB2FF),
+        useMaterial3: true,
+      ),
+      home: _StartupLoadingScreen(
+        stage: stage,
+        detail: detail,
+        progress: progress,
+      ),
+    );
+  }
+}
+
+class _StartupLoadingScreen extends StatelessWidget {
+  const _StartupLoadingScreen({
+    required this.stage,
+    required this.detail,
+    required this.progress,
+  });
+  final String stage;
+  final String detail;
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: const EdgeInsets.all(28),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  CircleAvatar(
+                    radius: 34,
+                    backgroundColor: colors.primaryContainer,
+                    child: Icon(
+                      Icons.terminal_rounded,
+                      size: 34,
+                      color: colors.onPrimaryContainer,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Agent Remote',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(end: progress),
+                    duration: const Duration(milliseconds: 300),
+                    builder: (_, value, _) => LinearProgressIndicator(
+                      value: value,
+                      minHeight: 6,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    stage,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    detail,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: colors.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class HermesRemoteApp extends StatelessWidget {
@@ -69,12 +235,20 @@ class HermesRemoteApp extends StatelessWidget {
   final AppController controller;
   final ConnectionSettingsController connections;
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: controller,
-    builder: (_, _) => MaterialApp(
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeModeChoice>(
+    valueListenable: controller.themeMode,
+    builder: (_, selectedTheme, _) => MaterialApp(
       title: 'Agent Remote',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+      theme: ThemeData(
+        colorSchemeSeed: Colors.indigo,
+        useMaterial3: true,
+        cardTheme: const CardThemeData(
+          elevation: 0,
+          margin: EdgeInsets.symmetric(vertical: 4),
+        ),
+        appBarTheme: const AppBarTheme(surfaceTintColor: Colors.transparent),
+      ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
@@ -94,12 +268,15 @@ class HermesRemoteApp extends StatelessWidget {
           margin: EdgeInsets.symmetric(vertical: 4),
         ),
       ),
-      themeMode: switch (controller.theme) {
+      themeMode: switch (selectedTheme) {
         ThemeModeChoice.light => ThemeMode.light,
         ThemeModeChoice.dark => ThemeMode.dark,
         _ => ThemeMode.system,
       },
-      home: AppShell(controller, connections),
+      home: ListenableBuilder(
+        listenable: controller,
+        builder: (_, _) => AppShell(controller, connections),
+      ),
     ),
   );
 }
@@ -115,6 +292,7 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   StreamSubscription<String>? _notificationSessionSubscription;
+  final Set<int> _loadedPages = {};
   AppController get c => widget.c;
   ConnectionSettingsController get connections => widget.connections;
 
@@ -122,6 +300,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _loadedPages.add(c.page);
     _notificationSessionSubscription = BackgroundTaskMonitor.openedSessions
         .listen(c.restoreLastSession);
   }
@@ -135,7 +314,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _restoreNotificationSession();
+    final foreground = state == AppLifecycleState.resumed;
+    c.setAppForeground(foreground);
+    if (foreground) _restoreNotificationSession();
   }
 
   Future<void> _restoreNotificationSession() async {
@@ -144,6 +325,25 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       await c.restoreLastSession(sessionId);
     }
   }
+
+  void _selectPage(int index) {
+    setState(() => _loadedPages.add(index));
+    c.setPage(index);
+    if (index == 2 && c.connected) {
+      unawaited(c.reloadWorkspaceData());
+    }
+  }
+
+  Widget _pageAt(int index) => KeyedSubtree(
+    key: ValueKey('root-page-$index'),
+    child: switch (index) {
+      0 => ChatsPage(c),
+      1 => TasksPage(c),
+      2 => FilesPage(c),
+      3 => SettingsPage(c, connections),
+      _ => UsagePage(c),
+    },
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -166,29 +366,60 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     if (c.current != null) return ChatScreen(c);
     final wide = MediaQuery.sizeOf(context).width >= 700;
-    final pages = [
-      ChatsPage(c),
-      TasksPage(c),
-      FilesPage(c),
-      SettingsPage(c, connections),
-      UsagePage(c),
-    ];
+    final activeTasks =
+        c.tasks
+            .where(
+              (task) => task.status == 'running' || task.status == 'queued',
+            )
+            .toList()
+          ..sort((left, right) {
+            final leftTime = left.updatedAt ?? left.createdAt;
+            final rightTime = right.updatedAt ?? right.createdAt;
+            return (rightTime?.millisecondsSinceEpoch ?? 0).compareTo(
+              leftTime?.millisecondsSinceEpoch ?? 0,
+            );
+          });
+    final latestTask = activeTasks.firstOrNull;
+    _loadedPages.add(c.page);
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: 16,
         title: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
             _GithubAvatar(c.gitRepository, radius: 17),
             const SizedBox(width: 10),
-            const Text('Agent Remote'),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    nav[c.page].$2,
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  Text(
+                    c.connected ? 'PC tersambung' : 'PC offline',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: c.connected
+                          ? Colors.green.shade700
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
         actions: [
-          Icon(
-            c.connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
-            color: c.connected ? Colors.greenAccent : null,
-          ),
-          const SizedBox(width: 16),
+          if (latestTask != null)
+            IconButton(
+              tooltip: 'Lihat task aktif',
+              onPressed: () => _selectPage(1),
+              icon: Badge(
+                label: Text('${activeTasks.length}'),
+                child: const Icon(Icons.bolt_rounded),
+              ),
+            ),
+          const SizedBox(width: 4),
         ],
       ),
       body: Row(
@@ -196,42 +427,184 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           if (wide)
             NavigationRail(
               selectedIndex: c.page,
-              onDestinationSelected: c.setPage,
+              onDestinationSelected: _selectPage,
               labelType: NavigationRailLabelType.all,
               destinations: nav
+                  .asMap()
+                  .entries
                   .map(
-                    (e) => NavigationRailDestination(
-                      icon: Icon(e.$1),
-                      label: Text(e.$2),
+                    (entry) => NavigationRailDestination(
+                      icon: _RootNavIcon(
+                        icon: entry.value.$1,
+                        count: entry.key == 1
+                            ? c.tasks
+                                  .where(
+                                    (task) =>
+                                        task.status == 'running' ||
+                                        task.status == 'queued',
+                                  )
+                                  .length
+                            : 0,
+                      ),
+                      label: Text(entry.value.$2),
                     ),
                   )
                   .toList(),
             ),
-          Expanded(child: pages[c.page]),
+          Expanded(
+            child: IndexedStack(
+              index: c.page,
+              children: List.generate(
+                nav.length,
+                (index) => _loadedPages.contains(index)
+                    ? _pageAt(index)
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: wide
           ? null
-          : NavigationBar(
-              selectedIndex: c.page,
-              onDestinationSelected: c.setPage,
-              destinations: nav
-                  .map(
-                    (e) => NavigationDestination(icon: Icon(e.$1), label: e.$2),
-                  )
-                  .toList(),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (latestTask != null)
+                  _GlobalTaskBar(
+                    task: latestTask,
+                    activeCount: activeTasks.length,
+                    onTap: () => _selectPage(1),
+                  ),
+                NavigationBar(
+                  selectedIndex: c.page,
+                  onDestinationSelected: _selectPage,
+                  destinations: nav
+                      .asMap()
+                      .entries
+                      .map(
+                        (entry) => NavigationDestination(
+                          icon: _RootNavIcon(
+                            icon: entry.value.$1,
+                            count: entry.key == 1 ? activeTasks.length : 0,
+                          ),
+                          label: entry.value.$2,
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
             ),
     );
   }
 }
 
 const nav = [
-  (Icons.chat_bubble_outline, 'Chat'),
+  (Icons.home_outlined, 'Beranda'),
   (Icons.task_alt, 'Proses'),
   (Icons.folder_outlined, 'File'),
-  (Icons.settings_outlined, 'Pengaturan'),
+  (Icons.settings_outlined, 'Setelan'),
   (Icons.monitor_heart_outlined, 'Token'),
 ];
+
+class _RootNavIcon extends StatelessWidget {
+  const _RootNavIcon({required this.icon, required this.count});
+  final IconData icon;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => count > 0
+      ? Badge(label: Text(count > 9 ? '9+' : '$count'), child: Icon(icon))
+      : Icon(icon);
+}
+
+class _GlobalTaskBar extends StatelessWidget {
+  const _GlobalTaskBar({
+    required this.task,
+    required this.activeCount,
+    required this.onTap,
+  });
+
+  final AgentTask task;
+  final int activeCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final detail = task.activeAgentState?.detail.isNotEmpty == true
+        ? task.activeAgentState!.detail
+        : task.detail;
+    return Material(
+      color: colors.primaryContainer,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              const SizedBox.square(
+                dimension: 18,
+                child: CircularProgressIndicator(strokeWidth: 2.2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$activeCount task aktif',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    Text(
+                      detail.isEmpty ? task.title : detail,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeading extends StatelessWidget {
+  const _SectionHeading(this.title, {this.subtitle});
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            if (subtitle != null)
+              Text(
+                subtitle!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+      ),
+    ],
+  );
+}
 
 class ChatsPage extends StatelessWidget {
   const ChatsPage(this.c, {super.key});
@@ -251,48 +624,21 @@ class ChatsPage extends StatelessWidget {
             .toList()
           ..sort((left, right) => timestamp(right).compareTo(timestamp(left)));
     return Padding(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'Project & Session',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          Text(
-            c.connected
-                ? 'Terhubung ke Agent Remote PC - eksekusi berjalan di PC.'
-                : c.isDemo
-                ? 'Preview offline • Hubungkan PC untuk sinkronisasi.'
-                : 'Menghubungkan ulang ke Agent Remote PC...',
-          ),
-          if (c.connector case final HermesRemoteConnector remote) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => showAgentSheet(context, c, remote),
-                    icon: const Icon(Icons.smart_toy_outlined),
-                    label: Text('Agent (${remote.selectedAgentIds.length})'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => showFolderSheet(context, c, remote),
-                    icon: const Icon(Icons.folder_outlined),
-                    label: const Text('Pilih folder'),
-                  ),
-                ),
-              ],
-            ),
-          ],
+          _HomeWorkspaceOverview(c: c, activeTasks: activeTasks),
           if (activeTasks.isNotEmpty) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             _HomeActiveTasksCard(c: c, tasks: activeTasks),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
+          const _SectionHeading(
+            'Semua session',
+            subtitle: 'Percakapan tersimpan berdasarkan folder kerja.',
+          ),
+          const SizedBox(height: 8),
           SearchBar(
             hintText: 'Cari session',
             leading: const Icon(Icons.search),
@@ -324,6 +670,7 @@ class ChatsPage extends StatelessWidget {
                       ],
                     )
                   : ListView(
+                      padding: const EdgeInsets.only(bottom: 20),
                       children: c.projects
                           .map((project) => ProjectSessionGroup(c, project))
                           .toList(),
@@ -332,6 +679,124 @@ class ChatsPage extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _HomeWorkspaceOverview extends StatelessWidget {
+  const _HomeWorkspaceOverview({required this.c, required this.activeTasks});
+  final AppController c;
+  final List<AgentTask> activeTasks;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final path = c.workspacePath ?? '';
+    final parts = path.split(RegExp(r'[\\/]')).where((part) => part.isNotEmpty);
+    final workspaceName = parts.isEmpty ? 'Semua folder PC' : parts.last;
+    final statusColor = c.connected ? Colors.green.shade600 : colors.outline;
+    final connector = c.connector;
+    final remote = connector is HermesRemoteConnector ? connector : null;
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Sessions',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                workspaceName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: statusColor.withValues(alpha: .12),
+            borderRadius: BorderRadius.circular(99),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                c.connected
+                    ? Icons.cloud_done_outlined
+                    : Icons.cloud_off_outlined,
+                size: 16,
+                color: statusColor,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                c.connected ? 'PC aktif' : 'Offline',
+                style: TextStyle(
+                  color: statusColor,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 4),
+        PopupMenuButton<String>(
+          tooltip: 'Kategori dan pengaturan',
+          icon: const Icon(Icons.tune_rounded),
+          onSelected: (value) {
+            if (remote == null) return;
+            switch (value) {
+              case 'folder':
+                showFolderSheet(context, c, remote);
+              case 'agent':
+                showAgentSheet(context, c, remote);
+              case 'task':
+                if (activeTasks.isNotEmpty) c.openTask(activeTasks.first);
+            }
+          },
+          itemBuilder: (context) => [
+            if (remote != null) ...[
+              PopupMenuItem(
+                value: 'folder',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.folder_outlined),
+                  title: const Text('Folder kerja'),
+                  subtitle: Text(workspaceName),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'agent',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.smart_toy_outlined),
+                  title: const Text('Agent'),
+                  subtitle: Text('${remote.selectedAgentIds.length} dipilih'),
+                ),
+              ),
+            ],
+            if (activeTasks.isNotEmpty)
+              PopupMenuItem(
+                value: 'task',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.bolt_rounded),
+                  title: const Text('Task aktif'),
+                  subtitle: Text('${activeTasks.length} sedang berjalan'),
+                ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -350,60 +815,54 @@ class _HomeActiveTasksCard extends StatelessWidget {
         .expand((task) => task.agentStates)
         .where((state) => state.status == 'running')
         .length;
-    return Card(
-      margin: EdgeInsets.zero,
-      color: colors.primaryContainer.withValues(alpha: .35),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
+    return OutlinedButton(
+      onPressed: latest.sessionId.isEmpty ? null : () => c.openTask(latest),
+      style: OutlinedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        alignment: Alignment.centerLeft,
         side: BorderSide(color: colors.primary.withValues(alpha: .35)),
+        backgroundColor: colors.primaryContainer.withValues(alpha: .22),
       ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: latest.sessionId.isEmpty ? null : () => c.openTask(latest),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: [
-              SizedBox.square(
-                dimension: 34,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: colors.primary,
-                    ),
-                    Icon(Icons.bolt, size: 17, color: colors.primary),
-                  ],
+      child: Row(
+        children: [
+          SizedBox.square(
+            dimension: 28,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: colors.primary,
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${tasks.length} task aktif • $runningAgents agent berjalan',
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                    Text(
-                      activeAgent?.detail.isNotEmpty == true
-                          ? '${activeAgent!.name}: ${activeAgent.detail}'
-                          : latest.detail,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              if (latest.sessionId.isNotEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(left: 8),
-                  child: Icon(Icons.arrow_forward),
-                ),
-            ],
+                Icon(Icons.bolt, size: 15, color: colors.primary),
+              ],
+            ),
           ),
-        ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${tasks.length} task aktif • $runningAgents agent berjalan',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                Text(
+                  activeAgent?.detail.isNotEmpty == true
+                      ? '${activeAgent!.name}: ${activeAgent.detail}'
+                      : latest.detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          if (latest.sessionId.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.only(left: 8),
+              child: Icon(Icons.arrow_forward, size: 18),
+            ),
+        ],
       ),
     );
   }
@@ -442,7 +901,7 @@ Future<void> showAgentSheet(
                 ],
               ),
               Text(
-                '${remote.selectedAgentIds.length} agent dipilih • Hanya CLI terpasang yang dapat dijalankan.',
+                '${remote.selectedAgentIds.length} agent dipilih • ${remote.concurrencyLimit} berjalan bersamaan • batas server ${remote.maxConcurrentAgents}.',
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
@@ -471,7 +930,44 @@ Future<void> showAgentSheet(
                     .toList(),
               ),
               const SizedBox(height: 8),
-              _AgentModeSummary(mode: remote.executionMode),
+              _AgentModeSummary(
+                mode: remote.executionMode,
+                maxConcurrentAgents: remote.maxConcurrentAgents,
+                concurrencyLimit: remote.concurrencyLimit,
+              ),
+              if (remote.executionMode != RemoteExecutionMode.single) ...[
+                const SizedBox(height: 10),
+                Text(
+                  'Batas proses PC',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (
+                      var value = 1;
+                      value <= remote.maxConcurrentAgents;
+                      value++
+                    )
+                      ChoiceChip(
+                        selected: remote.concurrencyLimit == value,
+                        label: Text(
+                          value == 1
+                              ? 'Hemat 1'
+                              : value == 2
+                              ? 'Normal 2'
+                              : '$value agent',
+                        ),
+                        onSelected: (_) {
+                          setSheetState(() => remote.concurrencyLimit = value);
+                          app.refresh();
+                        },
+                      ),
+                  ],
+                ),
+              ],
               if (remote.executionMode == RemoteExecutionMode.coordinator &&
                   remote.selectedAgentIds.isNotEmpty) ...[
                 const SizedBox(height: 8),
@@ -626,8 +1122,14 @@ Future<void> showAgentSheet(
 );
 
 class _AgentModeSummary extends StatelessWidget {
-  const _AgentModeSummary({required this.mode});
+  const _AgentModeSummary({
+    required this.mode,
+    required this.maxConcurrentAgents,
+    required this.concurrencyLimit,
+  });
   final RemoteExecutionMode mode;
+  final int maxConcurrentAgents;
+  final int concurrencyLimit;
 
   @override
   Widget build(BuildContext context) {
@@ -646,7 +1148,13 @@ class _AgentModeSummary extends StatelessWidget {
       child: ListTile(
         dense: true,
         leading: Icon(_executionModeIcon(mode), color: color),
-        title: Text(_executionModeDescription(mode)),
+        title: Text(
+          _executionModeDescription(
+            mode,
+            concurrencyLimit,
+            maxConcurrentAgents,
+          ),
+        ),
         subtitle: Text(
           _executionModeTokenNote(mode),
           style: TextStyle(color: color, fontWeight: FontWeight.w700),
@@ -735,6 +1243,11 @@ class _AgentSelectionCard extends StatelessWidget {
 
 void _setExecutionMode(HermesRemoteConnector remote, RemoteExecutionMode mode) {
   remote.executionMode = mode;
+  remote.concurrencyLimit = mode == RemoteExecutionMode.single
+      ? 1
+      : remote.concurrencyLimit < 2
+      ? remote.maxConcurrentAgents.clamp(1, 2)
+      : remote.concurrencyLimit.clamp(1, remote.maxConcurrentAgents);
   if (remote.selectedAgentIds.isEmpty) {
     final firstInstalled = remote.availableAgents
         .where((agent) => agent.installed)
@@ -774,8 +1287,8 @@ void _toggleAgentSelection(
 }
 
 String _executionModeLabel(RemoteExecutionMode mode) => switch (mode) {
-  RemoteExecutionMode.single => 'Satu agent',
-  RemoteExecutionMode.parallel => 'Paralel',
+  RemoteExecutionMode.single => 'Hemat',
+  RemoteExecutionMode.parallel => 'Multi-agent',
   RemoteExecutionMode.coordinator => 'Koordinator',
 };
 
@@ -785,12 +1298,16 @@ IconData _executionModeIcon(RemoteExecutionMode mode) => switch (mode) {
   RemoteExecutionMode.coordinator => Icons.account_tree_outlined,
 };
 
-String _executionModeDescription(RemoteExecutionMode mode) => switch (mode) {
-  RemoteExecutionMode.single => 'Satu agent mengerjakan seluruh task.',
+String _executionModeDescription(
+  RemoteExecutionMode mode,
+  int concurrencyLimit,
+  int maxConcurrentAgents,
+) => switch (mode) {
+  RemoteExecutionMode.single => 'Satu agent aktif. Beban PC paling rendah.',
   RemoteExecutionMode.parallel =>
-    'Beberapa agent bekerja terpisah pada prompt yang sama.',
+    '$concurrencyLimit agent aktif bersamaan, sisanya antre. Batas server $maxConcurrentAgents.',
   RemoteExecutionMode.coordinator =>
-    'Worker menganalisis, lalu koordinator menyatukan hasil.',
+    '$concurrencyLimit worker aktif bersamaan, lalu koordinator menyatukan hasil.',
 };
 
 String _executionModeTokenNote(RemoteExecutionMode mode) => switch (mode) {
@@ -1236,6 +1753,16 @@ class ProjectSessionGroup extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (project.isGitRepository)
+              Tooltip(
+                message: 'Git repository terdeteksi',
+                child: Icon(
+                  Icons.account_tree_outlined,
+                  size: 18,
+                  color: colors.secondary,
+                ),
+              ),
+            if (project.isGitRepository) const SizedBox(width: 10),
             if (activeTasks.isNotEmpty)
               Badge(
                 label: Text('${activeTasks.length}'),
@@ -1561,6 +2088,7 @@ String _taskPermissionLabel(String permission) => switch (permission) {
 };
 
 String _taskPhaseLabel(String phase) => switch (phase) {
+  'queued' => 'Menunggu antrean',
   'preparing' => 'Menyiapkan',
   'thinking' => 'Menganalisis',
   'running_command' => 'Menjalankan command',
@@ -1637,6 +2165,85 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class _ChatContextBar extends StatelessWidget {
+  const _ChatContextBar({
+    required this.session,
+    required this.task,
+    required this.workspacePath,
+  });
+  final AgentSession session;
+  final AgentTask? task;
+  final String workspacePath;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final folderParts = workspacePath
+        .split(RegExp(r'[\\/]'))
+        .where((part) => part.isNotEmpty);
+    final folder = folderParts.isEmpty
+        ? 'Folder belum dipilih'
+        : folderParts.last;
+    final agentLabel = task?.agentStates.isNotEmpty == true
+        ? task!.agentStates.map((state) => state.name).join(' + ')
+        : session.activeModelName ?? 'Agent PC';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: .55),
+        border: Border(bottom: BorderSide(color: colors.outlineVariant)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            _ContextChip(icon: Icons.folder_outlined, label: folder),
+            const SizedBox(width: 7),
+            _ContextChip(icon: Icons.smart_toy_outlined, label: agentLabel),
+            if (task != null) ...[
+              const SizedBox(width: 7),
+              _ContextChip(
+                icon: Icons.hub_outlined,
+                label:
+                    '${_taskModeLabel(task!.mode)} • ${task!.concurrency} slot',
+              ),
+              const SizedBox(width: 7),
+              _ContextChip(
+                icon: Icons.security_outlined,
+                label: _taskPermissionLabel(task!.permission),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ContextChip extends StatelessWidget {
+  const _ContextChip({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(99),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 15),
+        const SizedBox(width: 5),
+        Text(label, style: Theme.of(context).textTheme.labelMedium),
+      ],
+    ),
+  );
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   final text = TextEditingController();
   final messageScroll = ScrollController();
@@ -1661,6 +2268,91 @@ class _ChatScreenState extends State<ChatScreen> {
       ..dispose();
     text.dispose();
     super.dispose();
+  }
+
+  Future<void> _showSessionSwitcher() async {
+    final c = widget.c;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: .72,
+          minChildSize: .42,
+          maxChildSize: .92,
+          builder: (context, scrollController) => Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Session folder ini',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Session baru',
+                      onPressed: () => Navigator.pop(sheetContext, '__new__'),
+                      icon: const Icon(Icons.add_comment_outlined),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.builder(
+                  controller: scrollController,
+                  itemCount: c.sessions.length,
+                  itemBuilder: (_, index) {
+                    final session = c.sessions[index];
+                    final active = session.id == c.currentId;
+                    return ListTile(
+                      selected: active,
+                      leading: Icon(
+                        session.status == SessionStatus.generating
+                            ? Icons.bolt_rounded
+                            : Icons.chat_bubble_outline,
+                      ),
+                      title: Text(
+                        session.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        session.preview.isEmpty
+                            ? _sessionStatusLabel(
+                                session.status,
+                                empty: session.messageCount == 0,
+                              )
+                            : session.preview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: active
+                          ? const Icon(Icons.check_circle_outline)
+                          : null,
+                      onTap: () => Navigator.pop(sheetContext, session.id),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || selected == null) return;
+    if (selected == '__new__') {
+      await c.newSession();
+      return;
+    }
+    final session = c.sessions.where((item) => item.id == selected).firstOrNull;
+    if (session != null && session.id != c.currentId) await c.open(session);
   }
 
   @override
@@ -1696,10 +2388,23 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Pilih session',
+            onPressed: _showSessionSwitcher,
+            icon: const Icon(Icons.forum_outlined),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: SafeArea(
         child: Column(
           children: [
+            _ChatContextBar(
+              session: s,
+              task: sessionTask,
+              workspacePath: c.workspacePath ?? '',
+            ),
             if (sessionTask != null ||
                 s.activities.isNotEmpty ||
                 s.status == SessionStatus.generating)
@@ -2198,24 +2903,29 @@ class ActivitySummaryCard extends StatelessWidget {
                 ),
               ],
             ),
-            if (task?.agentStates.isNotEmpty == true) ...[
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 78,
-                child: ListView.separated(
+            if (task?.agentStates.isNotEmpty == true)
+              Padding(
+                padding: const EdgeInsets.only(left: 36, top: 6),
+                child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  itemCount: task!.agentStates.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
-                  itemBuilder: (context, index) {
-                    final state = task!.agentStates[index];
-                    return _SessionAgentPill(
-                      state: state,
-                      active: state.id == task!.activeAgent && state.isActive,
-                    );
-                  },
+                  child: Row(
+                    children: [
+                      for (
+                        var index = 0;
+                        index < task!.agentStates.length;
+                        index++
+                      ) ...[
+                        if (index > 0) const Text(' • '),
+                        Text(
+                          task!.agentStates[index].name,
+                          style: Theme.of(context).textTheme.labelMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
-            ],
             if (running) const LinearProgressIndicator(minHeight: 3),
           ],
         ),
@@ -3468,43 +4178,10 @@ class _TasksPageState extends State<TasksPage> {
             ),
           ),
           const SizedBox(height: 12),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final columns = constraints.maxWidth < 360 ? 2 : 3;
-              final width =
-                  (constraints.maxWidth - ((columns - 1) * 8)) / columns;
-              return Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  SizedBox(
-                    width: width,
-                    child: _TaskMetricCard(
-                      icon: Icons.bolt_outlined,
-                      value: activeCount,
-                      label: 'Task aktif',
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _TaskMetricCard(
-                      icon: Icons.smart_toy_outlined,
-                      value: runningAgents,
-                      label: 'Agent aktif',
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _TaskMetricCard(
-                      icon: Icons.warning_amber_outlined,
-                      value: attentionCount,
-                      label: 'Perhatian',
-                      attention: attentionCount > 0,
-                    ),
-                  ),
-                ],
-              );
-            },
+          _TaskSummaryStrip(
+            active: activeCount,
+            agents: runningAgents,
+            attention: attentionCount,
           ),
           const SizedBox(height: 10),
           SingleChildScrollView(
@@ -3567,45 +4244,67 @@ class _TasksPageState extends State<TasksPage> {
   }
 }
 
-class _TaskMetricCard extends StatelessWidget {
-  const _TaskMetricCard({
-    required this.icon,
-    required this.value,
-    required this.label,
-    this.attention = false,
+class _TaskSummaryStrip extends StatelessWidget {
+  const _TaskSummaryStrip({
+    required this.active,
+    required this.agents,
+    required this.attention,
   });
-  final IconData icon;
-  final int value;
-  final String label;
-  final bool attention;
+
+  final int active;
+  final int agents;
+  final int attention;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final color = attention ? colors.error : colors.primary;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: .1),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: .24)),
-      ),
-      child: Column(
-        children: [
-          Icon(icon, size: 20, color: color),
-          const SizedBox(height: 4),
-          Text(
-            '$value',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w800,
+    Widget metric(IconData icon, String value, String label, Color color) =>
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 11),
+            child: Column(
+              children: [
+                Icon(icon, size: 19, color: color),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                Text(label, style: Theme.of(context).textTheme.labelSmall),
+              ],
             ),
           ),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelSmall,
+        );
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          metric(Icons.bolt_rounded, '$active', 'Aktif', colors.primary),
+          SizedBox(
+            height: 44,
+            child: VerticalDivider(color: colors.outlineVariant),
+          ),
+          metric(
+            Icons.smart_toy_outlined,
+            '$agents',
+            'Agent',
+            colors.secondary,
+          ),
+          SizedBox(
+            height: 44,
+            child: VerticalDivider(color: colors.outlineVariant),
+          ),
+          metric(
+            Icons.warning_amber_rounded,
+            '$attention',
+            'Perhatian',
+            attention > 0 ? colors.error : colors.onSurfaceVariant,
           ),
         ],
       ),
@@ -3649,6 +4348,9 @@ class _AgentTaskCard extends StatelessWidget {
         .where((state) => state.status == 'running')
         .length;
     final canOpen = task.sessionId.isNotEmpty && task.source == 'agent_remote';
+    final activeAgent = task.activeAgentState;
+    final canStop =
+        canOpen && (task.status == 'running' || task.status == 'queued');
     return Card(
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
@@ -3670,34 +4372,30 @@ class _AgentTaskCard extends StatelessWidget {
           style: const TextStyle(fontWeight: FontWeight.w700),
         ),
         subtitle: Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 6,
+          padding: const EdgeInsets.only(top: 5),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Chip(
-                visualDensity: VisualDensity.compact,
-                backgroundColor: statusColor.withValues(alpha: .12),
-                side: BorderSide(color: statusColor.withValues(alpha: .35)),
-                labelStyle: TextStyle(
+              Text(
+                '${_taskStatusLabel(task.status)} • '
+                '${task.status == 'running' ? '$runningCount/${task.agentStates.length} aktif' : '${task.agentStates.length} agent'} • '
+                '${_taskModeLabel(task.mode)} • ${task.concurrency} slot',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
                   color: statusColor,
-                  fontWeight: FontWeight.w700,
-                ),
-                label: Text(_taskStatusLabel(task.status)),
-              ),
-              Chip(
-                visualDensity: VisualDensity.compact,
-                avatar: const Icon(Icons.hub_outlined, size: 16),
-                label: Text(
-                  task.status == 'running'
-                      ? '$runningCount/${task.agentStates.length} agent aktif'
-                      : '${task.agentStates.length} agent',
+                  fontWeight: FontWeight.w800,
                 ),
               ),
-              Chip(
-                visualDensity: VisualDensity.compact,
-                label: Text(_taskModeLabel(task.mode)),
-              ),
+              if (activeAgent?.detail.isNotEmpty == true ||
+                  task.detail.isNotEmpty)
+                Text(
+                  activeAgent?.detail.isNotEmpty == true
+                      ? activeAgent!.detail
+                      : task.detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
             ],
           ),
         ),
@@ -3764,13 +4462,29 @@ class _AgentTaskCard extends StatelessWidget {
           if (canOpen)
             Padding(
               padding: const EdgeInsets.only(top: 10),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.tonalIcon(
-                  onPressed: () => c.openTask(task),
-                  icon: const Icon(Icons.open_in_new, size: 18),
-                  label: const Text('Buka session'),
-                ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  if (canStop) ...[
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final accepted = await confirm(
+                          context,
+                          'Hentikan task ini?',
+                        );
+                        if (accepted) await c.stopSession(task.sessionId);
+                      },
+                      icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                      label: const Text('Stop'),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  FilledButton.tonalIcon(
+                    onPressed: () => c.openTask(task),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text('Buka session'),
+                  ),
+                ],
               ),
             ),
         ],
@@ -3912,6 +4626,8 @@ class _TaskStatusIcon extends StatelessWidget {
 
 enum _GitChangeFilter { all, modified, added, deleted, untracked }
 
+enum _FilesView { explorer, changes, git }
+
 class FilesPage extends StatefulWidget {
   const FilesPage(this.c, {super.key});
   final AppController c;
@@ -3920,8 +4636,73 @@ class FilesPage extends StatefulWidget {
   State<FilesPage> createState() => _FilesPageState();
 }
 
-class _FilesPageState extends State<FilesPage> {
+class _FilesPageState extends State<FilesPage> with WidgetsBindingObserver {
+  static const liveSyncInterval = Duration(seconds: 10);
+  static const remoteSyncInterval = Duration(seconds: 60);
   _GitChangeFilter filter = _GitChangeFilter.all;
+  _FilesView view = _FilesView.explorer;
+  Timer? liveSyncTimer;
+  bool liveSyncRunning = false;
+  DateTime? liveSyncUpdatedAt;
+  DateTime? liveRemoteFetchedAt;
+  Object? liveSyncError;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    startLiveSync();
+  }
+
+  void startLiveSync() {
+    liveSyncTimer?.cancel();
+    WidgetsBinding.instance.addPostFrameCallback((_) => refreshLive());
+    liveSyncTimer = Timer.periodic(liveSyncInterval, (_) => refreshLive());
+  }
+
+  Future<void> refreshLive({bool force = false}) async {
+    if (!mounted ||
+        liveSyncRunning ||
+        !force && (!widget.c.connected || widget.c.page != 2)) {
+      return;
+    }
+    liveSyncRunning = true;
+    if (mounted) setState(() {});
+    try {
+      final now = DateTime.now();
+      final fetchRemote =
+          force ||
+          liveRemoteFetchedAt == null ||
+          now.difference(liveRemoteFetchedAt!) >= remoteSyncInterval;
+      await widget.c.reloadWorkspaceData(fetchGit: fetchRemote);
+      if (fetchRemote) liveRemoteFetchedAt = DateTime.now();
+      liveSyncUpdatedAt = DateTime.now();
+      liveSyncError = null;
+    } catch (error) {
+      liveSyncError = error;
+    } finally {
+      liveSyncRunning = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      startLiveSync();
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      liveSyncTimer?.cancel();
+    }
+  }
+
+  @override
+  void dispose() {
+    liveSyncTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   Future<void> openFile(String path) async {
     final editor = switch (widget.c.connector) {
@@ -3998,9 +4779,16 @@ class _FilesPageState extends State<FilesPage> {
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
             ),
+            _LiveSyncBadge(
+              connected: c.connected,
+              running: liveSyncRunning,
+              updatedAt: liveSyncUpdatedAt,
+              error: liveSyncError,
+            ),
+            const SizedBox(width: 4),
             IconButton(
               tooltip: 'Muat ulang workspace',
-              onPressed: c.reloadWorkspaceData,
+              onPressed: () => refreshLive(force: true),
               icon: const Icon(Icons.refresh),
             ),
           ],
@@ -4013,36 +4801,59 @@ class _FilesPageState extends State<FilesPage> {
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
         ),
-        Card(
-          margin: const EdgeInsets.only(top: 12),
-          color: Theme.of(context).colorScheme.primaryContainer,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                const CircleAvatar(child: Icon(Icons.code_outlined)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Editor workspace',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w800),
-                      ),
-                      const Text(
-                        'Tap file untuk preview, lihat diff, atau edit manual. 0 token AI.',
-                      ),
-                    ],
+        const SizedBox(height: 12),
+        SegmentedButton<_FilesView>(
+          segments: const [
+            ButtonSegment(
+              value: _FilesView.explorer,
+              icon: Icon(Icons.folder_outlined),
+              label: Text('Explorer'),
+            ),
+            ButtonSegment(
+              value: _FilesView.changes,
+              icon: Icon(Icons.difference_outlined),
+              label: Text('Changes'),
+            ),
+            ButtonSegment(
+              value: _FilesView.git,
+              icon: Icon(Icons.account_tree_outlined),
+              label: Text('Git'),
+            ),
+          ],
+          selected: {view},
+          onSelectionChanged: (value) => setState(() => view = value.first),
+        ),
+        if (view == _FilesView.explorer)
+          Card(
+            margin: const EdgeInsets.only(top: 12),
+            color: Theme.of(context).colorScheme.primaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const CircleAvatar(child: Icon(Icons.code_outlined)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Editor workspace',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w800),
+                        ),
+                        const Text(
+                          'Tap file untuk preview, lihat diff, atau edit manual. 0 token AI.',
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const Icon(Icons.chevron_right),
-              ],
+                  const Icon(Icons.chevron_right),
+                ],
+              ),
             ),
           ),
-        ),
-        if (repository.isGitRepository)
+        if (view == _FilesView.git && repository.isGitRepository)
           Card(
             margin: const EdgeInsets.symmetric(vertical: 12),
             clipBehavior: Clip.antiAlias,
@@ -4142,7 +4953,7 @@ class _FilesPageState extends State<FilesPage> {
                     title: 'Bandingkan branch',
                     subtitle: repository.upstream.isEmpty
                         ? 'Pilih upstream lebih dahulu'
-                        : '${repository.branch} â†” ${repository.upstream}',
+                        : '${repository.branch} ↔ ${repository.upstream}',
                     trailing: repository.remoteUrl.isEmpty
                         ? null
                         : IconButton(
@@ -4227,17 +5038,45 @@ class _FilesPageState extends State<FilesPage> {
               ),
             ),
           )
-        else
-          const Card(
-            child: ListTile(
-              leading: Icon(Icons.cloud_off_outlined),
-              title: Text('Folder ini tidak terhubung ke Git repository'),
-              subtitle: Text(
-                'Session tetap tersimpan khusus untuk folder ini.',
-              ),
+        else if (!repository.isGitRepository && view == _FilesView.git)
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: Icon(
+                    repository.nestedRepositories.isEmpty
+                        ? Icons.cloud_off_outlined
+                        : Icons.account_tree_outlined,
+                  ),
+                  title: Text(
+                    repository.nestedRepositories.isEmpty
+                        ? 'Folder ini bukan Git repository'
+                        : 'Folder induk memuat ${repository.nestedRepositories.length} Git repository',
+                  ),
+                  subtitle: Text(
+                    repository.nestedRepositories.isEmpty
+                        ? 'Session tetap tersimpan khusus untuk folder ini.'
+                        : 'Pilih repository agar branch, remote, commit, dan perubahan terbaca tepat.',
+                  ),
+                ),
+                ...repository.nestedRepositories.map(
+                  (nested) => ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.folder_special_outlined),
+                    title: Text(nested.name),
+                    subtitle: Text(
+                      nested.path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => c.selectWorkspace(nested.path),
+                  ),
+                ),
+              ],
             ),
           ),
-        if (repository.isGitRepository) ...[
+        if (view == _FilesView.changes && repository.isGitRepository) ...[
           Row(
             children: [
               Expanded(
@@ -4331,87 +5170,165 @@ class _FilesPageState extends State<FilesPage> {
             ),
           const SizedBox(height: 12),
         ],
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Isi folder',
-                style: Theme.of(context).textTheme.titleLarge,
+        if (view == _FilesView.explorer) ...[
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Isi folder',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ),
+              if (c.workspaceFolder.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () => c.openWorkspaceFolder(''),
+                  icon: const Icon(Icons.home_outlined),
+                  label: const Text('Root'),
+                ),
+            ],
+          ),
+          Text(
+            c.workspaceFolder.isEmpty ? 'Workspace root' : c.workspaceFolder,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (entries.isEmpty)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.folder_open),
+                title: Text(
+                  c.workspacePath == null
+                      ? 'Pilih folder kerja dari halaman utama'
+                      : 'Folder kosong atau belum termuat',
+                ),
+              ),
+            )
+          else
+            Card(
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                children: [
+                  for (var index = 0; index < entries.length; index++) ...[
+                    if (index > 0) const Divider(height: 1),
+                    Builder(
+                      builder: (context) {
+                        final entry = entries[index];
+                        final status = statuses[entry.path];
+                        return ListTile(
+                          onTap: entry.isDirectory
+                              ? () => c.openWorkspaceFolder(entry.path)
+                              : () => openFile(entry.path),
+                          leading: Icon(
+                            entry.isDirectory
+                                ? Icons.folder_outlined
+                                : Icons.insert_drive_file_outlined,
+                          ),
+                          title: Text(
+                            entry.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: status == null
+                              ? entry.isDirectory
+                                    ? const Icon(Icons.chevron_right)
+                                    : null
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _GitStatusBadge(status),
+                                    const SizedBox(width: 4),
+                                    const Icon(Icons.chevron_right),
+                                  ],
+                                ),
+                        );
+                      },
+                    ),
+                  ],
+                ],
               ),
             ),
-            if (c.workspaceFolder.isNotEmpty)
-              TextButton.icon(
-                onPressed: () => c.openWorkspaceFolder(''),
-                icon: const Icon(Icons.home_outlined),
-                label: const Text('Root'),
+        ],
+      ],
+    );
+  }
+}
+
+class _LiveSyncBadge extends StatelessWidget {
+  const _LiveSyncBadge({
+    required this.connected,
+    required this.running,
+    required this.updatedAt,
+    required this.error,
+  });
+  final bool connected;
+  final bool running;
+  final DateTime? updatedAt;
+  final Object? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final failed = error != null;
+    final color = !connected
+        ? colors.outline
+        : failed
+        ? colors.error
+        : colors.primary;
+    final label = !connected
+        ? 'Offline'
+        : running
+        ? 'Sync...'
+        : failed
+        ? 'Retry'
+        : 'Live';
+    final message = !connected
+        ? 'Hubungkan PC untuk live sync Git'
+        : failed
+        ? 'Live sync gagal: $error'
+        : updatedAt == null
+        ? 'Status lokal 5 detik • remote 30 detik'
+        : 'Terakhir sync ${formatLocalClock(updatedAt!)}';
+    return Tooltip(
+      message: message,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (running)
+              SizedBox.square(
+                dimension: 12,
+                child: CircularProgressIndicator(strokeWidth: 2, color: color),
+              )
+            else
+              Icon(
+                !connected
+                    ? Icons.cloud_off_outlined
+                    : failed
+                    ? Icons.sync_problem_outlined
+                    : Icons.sync_outlined,
+                size: 15,
+                color: color,
               ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: color,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ],
         ),
-        Text(
-          c.workspaceFolder.isEmpty ? 'Workspace root' : c.workspaceFolder,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 8),
-        if (entries.isEmpty)
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.folder_open),
-              title: Text(
-                c.workspacePath == null
-                    ? 'Pilih folder kerja dari halaman utama'
-                    : 'Folder kosong atau belum termuat',
-              ),
-            ),
-          )
-        else
-          Card(
-            clipBehavior: Clip.antiAlias,
-            child: Column(
-              children: [
-                for (var index = 0; index < entries.length; index++) ...[
-                  if (index > 0) const Divider(height: 1),
-                  Builder(
-                    builder: (context) {
-                      final entry = entries[index];
-                      final status = statuses[entry.path];
-                      return ListTile(
-                        onTap: entry.isDirectory
-                            ? () => c.openWorkspaceFolder(entry.path)
-                            : () => openFile(entry.path),
-                        leading: Icon(
-                          entry.isDirectory
-                              ? Icons.folder_outlined
-                              : Icons.insert_drive_file_outlined,
-                        ),
-                        title: Text(
-                          entry.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: status == null
-                            ? entry.isDirectory
-                                  ? const Icon(Icons.chevron_right)
-                                  : null
-                            : Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _GitStatusBadge(status),
-                                  const SizedBox(width: 4),
-                                  const Icon(Icons.chevron_right),
-                                ],
-                              ),
-                      );
-                    },
-                  ),
-                ],
-              ],
-            ),
-          ),
-      ],
+      ),
     );
   }
 }
@@ -5280,6 +6197,7 @@ class _UsagePageState extends State<UsagePage> {
   String provider = '';
   String model = '';
   String scope = 'all';
+  bool showDetails = false;
   late Future<ProviderUsageSnapshot> usage;
 
   ProviderUsageMonitor? get monitor => switch (widget.c.connector) {
@@ -5452,26 +6370,48 @@ class _UsagePageState extends State<UsagePage> {
               const SizedBox(height: 12),
               _UsageSummaryGrid(value.summary),
               const SizedBox(height: 12),
-              _ActiveModelCard(value.active),
-              const SizedBox(height: 12),
               Card(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                child: ListTile(
-                  leading: Icon(
-                    scope == 'mobile'
-                        ? Icons.phone_android_outlined
-                        : Icons.computer_outlined,
-                  ),
+                clipBehavior: Clip.antiAlias,
+                child: ExpansionTile(
+                  initiallyExpanded: showDetails,
+                  onExpansionChanged: (expanded) =>
+                      setState(() => showDetails = expanded),
+                  leading: const Icon(Icons.insights_outlined),
                   title: Text(
-                    scope == 'mobile'
-                        ? 'Konsumsi task dari HP'
-                        : 'Semua konsumsi PC',
+                    value.active?.model ?? 'Model belum aktif',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
                   subtitle: Text(
-                    scope == 'mobile'
-                        ? 'Atribusi memakai API key 9Router khusus Agent Remote. Key tidak pernah dikirim ke HP.'
-                        : 'Mencakup seluruh request 9Router pada PC, termasuk Codex Desktop dan CLI.',
+                    value.active == null
+                        ? 'Model, quota, dan atribusi tersembunyi'
+                        : '${value.active!.provider} • model aktif',
                   ),
+                  children: [
+                    _ActiveModelCard(value.active),
+                    _QuotaTracker(value.quotaAccounts),
+                    Card(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
+                      child: ListTile(
+                        leading: Icon(
+                          scope == 'mobile'
+                              ? Icons.phone_android_outlined
+                              : Icons.computer_outlined,
+                        ),
+                        title: Text(
+                          scope == 'mobile'
+                              ? 'Konsumsi task dari HP'
+                              : 'Semua konsumsi PC',
+                        ),
+                        subtitle: Text(
+                          scope == 'mobile'
+                              ? 'Atribusi memakai API key 9Router khusus Agent Remote. Key tidak pernah dikirim ke HP.'
+                              : 'Mencakup seluruh request 9Router pada PC, termasuk Codex Desktop dan CLI.',
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 12),
@@ -5509,6 +6449,143 @@ class _UsagePageState extends State<UsagePage> {
       );
     },
   );
+}
+
+class _QuotaTracker extends StatelessWidget {
+  const _QuotaTracker(this.accounts);
+  final List<ProviderQuotaAccount> accounts;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Quota 9Router',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+            Text('${accounts.where((value) => value.active).length} aktif'),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (accounts.isEmpty)
+          const Card(
+            child: ListTile(
+              leading: Icon(Icons.data_usage_outlined),
+              title: Text('Account 9Router belum terbaca'),
+            ),
+          )
+        else
+          ...accounts.map((account) {
+            final healthy =
+                account.active &&
+                account.status == 'active' &&
+                !account.limitReached;
+            final remaining = account.quotas.fold<double>(
+              100,
+              (lowest, quota) => quota.remainingPercent < lowest
+                  ? quota.remainingPercent
+                  : lowest,
+            );
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ExpansionTile(
+                initiallyExpanded: false,
+                leading: CircleAvatar(
+                  backgroundColor:
+                      (healthy
+                              ? Colors.green
+                              : account.active
+                              ? colors.error
+                              : colors.outline)
+                          .withValues(alpha: .12),
+                  child: Icon(
+                    Icons.route_outlined,
+                    color: healthy
+                        ? Colors.green.shade700
+                        : account.active
+                        ? colors.error
+                        : colors.outline,
+                  ),
+                ),
+                title: Text(
+                  account.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  [
+                    account.provider,
+                    if (account.plan.isNotEmpty) account.plan,
+                    if (account.model.isNotEmpty) account.model,
+                    if (account.quotas.isNotEmpty)
+                      '${remaining.toStringAsFixed(0)}% tersisa',
+                    account.active ? account.status : 'nonaktif',
+                  ].join(' • '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                children: [
+                  if (account.quotas.isEmpty)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        account.error.isNotEmpty
+                            ? account.error
+                            : 'Provider tidak menyediakan persentase quota.',
+                        style: TextStyle(color: colors.onSurfaceVariant),
+                      ),
+                    )
+                  else
+                    ...account.quotas.map(
+                      (quota) => Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    quota.label,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  '${quota.remainingPercent.toStringAsFixed(0)}% tersisa',
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            LinearProgressIndicator(
+                              value: quota.usedPercent / 100,
+                            ),
+                            if (quota.resetAt != null) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                'Reset ${formatLocalClock(quota.resetAt!)}',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          }),
+      ],
+    );
+  }
 }
 
 class _UsageScopeSelector extends StatelessWidget {
@@ -5787,7 +6864,7 @@ class _ActiveModelCard extends StatelessWidget {
           style: const TextStyle(fontWeight: FontWeight.w800),
         ),
         subtitle: Text(
-          '${value.provider} â€¢ ${value.isActive ? 'Aktif sekarang' : 'Terakhir digunakan'} â€¢ ${formatLocalClock(value.timestamp)}',
+          '${value.provider} • ${value.isActive ? 'Aktif sekarang' : 'Terakhir digunakan'} • ${formatLocalClock(value.timestamp)}',
         ),
         trailing: value.isActive
             ? const Icon(Icons.circle, size: 12, color: Colors.green)
@@ -5813,7 +6890,7 @@ class _UsageRequestTile extends StatelessWidget {
     ),
     title: Text(entry.model, maxLines: 1, overflow: TextOverflow.ellipsis),
     subtitle: Text(
-      '${entry.provider} â€¢ ${formatLocalClock(entry.timestamp)} â€¢ cache ${_formatUsageNumber(entry.cachedTokens)}',
+      '${entry.provider} • ${formatLocalClock(entry.timestamp)} • cache ${_formatUsageNumber(entry.cachedTokens)}',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
     ),
@@ -5821,12 +6898,12 @@ class _UsageRequestTile extends StatelessWidget {
       TextSpan(
         children: [
           TextSpan(
-            text: '${_formatUsageNumber(entry.inputTokens)}â†‘',
+            text: '${_formatUsageNumber(entry.inputTokens)}↑',
             style: const TextStyle(color: Colors.deepOrangeAccent),
           ),
           const TextSpan(text: '  '),
           TextSpan(
-            text: '${_formatUsageNumber(entry.outputTokens)}â†“',
+            text: '${_formatUsageNumber(entry.outputTokens)}↓',
             style: const TextStyle(color: Colors.greenAccent),
           ),
         ],
@@ -5864,6 +6941,158 @@ String _formatUsageNumber(int value) {
     buffer.write(digits[index]);
   }
   return '${value < 0 ? '-' : ''}$buffer';
+}
+
+class _NotificationSoundCard extends StatefulWidget {
+  const _NotificationSoundCard();
+
+  @override
+  State<_NotificationSoundCard> createState() => _NotificationSoundCardState();
+}
+
+class _NotificationSoundCardState extends State<_NotificationSoundCard> {
+  String name = '';
+  bool loading = true;
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final value = await BackgroundTaskMonitor.getNotificationSound();
+      if (mounted) name = value?['name'] ?? '';
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> _pick() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      final value = await BackgroundTaskMonitor.pickNotificationSound();
+      if (mounted && value != null) {
+        setState(() => name = value['name'] ?? 'Suara custom');
+      }
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _reset() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      await BackgroundTaskMonitor.clearNotificationSound();
+      if (mounted) setState(() => name = '');
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _preview() async {
+    if (busy || name.isEmpty) return;
+    setState(() => busy = true);
+    try {
+      await BackgroundTaskMonitor.previewNotificationSound();
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  void _showError(Object error) {
+    if (!mounted) return;
+    final message = error is PlatformException
+        ? error.message ?? 'File suara tidak dapat dipakai.'
+        : 'File suara tidak dapat dipakai.';
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const CircleAvatar(child: Icon(Icons.music_note_outlined)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      loading
+                          ? 'Membaca suara...'
+                          : name.isEmpty
+                          ? 'Suara default Android'
+                          : name,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      name.isEmpty
+                          ? 'Pilih audio dari Downloads, Drive, atau aplikasi lain. Maksimal 50 MB.'
+                          : 'File tersimpan aman di aplikasi dan tetap aktif setelah restart.',
+                    ),
+                  ],
+                ),
+              ),
+              if (busy || loading) ...[
+                const SizedBox(width: 12),
+                const SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (name.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: busy ? null : _reset,
+                    icon: const Icon(Icons.restart_alt),
+                    label: const Text('Default'),
+                  ),
+                if (name.isNotEmpty)
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : _preview,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Preview'),
+                  ),
+                FilledButton.tonalIcon(
+                  onPressed: loading || busy ? null : _pick,
+                  icon: const Icon(Icons.audio_file_outlined),
+                  label: const Text('Pilih file'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class SettingsPage extends StatelessWidget {
@@ -5966,6 +7195,12 @@ class SettingsPage extends StatelessWidget {
                 subtitle: Text(error),
               ),
             ),
+          const SizedBox(height: 12),
+          const _SettingsSectionTitle(
+            icon: Icons.notifications_active_outlined,
+            title: 'Notifikasi task',
+          ),
+          const _NotificationSoundCard(),
           if (c.connector case final SecurityMonitor monitor) ...[
             const SizedBox(height: 12),
             const _SettingsSectionTitle(

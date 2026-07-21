@@ -32,6 +32,17 @@ GitRepositoryStatus decodeGitRepositoryStatus(Map<String, Object?> data) {
     githubAvatarUrl: data['github_avatar_url'] as String? ?? '',
     incoming: commits('incoming'),
     outgoing: commits('outgoing'),
+    nestedRepositories: (data['nested_repositories'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) {
+          final value = Map<String, Object?>.from(item);
+          return GitNestedRepository(
+            name: value['name'] as String? ?? '',
+            path: value['path'] as String? ?? '',
+          );
+        })
+        .where((item) => item.path.isNotEmpty)
+        .toList(),
   );
 }
 
@@ -50,6 +61,18 @@ ProviderUsageEntry _decodeProviderUsageEntry(Map<String, Object?> value) =>
       status: value['status'] as String? ?? 'unknown',
       isActive: value['is_active'] == true,
     );
+
+DateTime? _decodeDateTime(Object? value) {
+  if (value is String) return DateTime.tryParse(value);
+  if (value is num) {
+    final milliseconds = value.abs() < 100000000000 ? value * 1000 : value;
+    return DateTime.fromMillisecondsSinceEpoch(
+      milliseconds.toInt(),
+      isUtc: true,
+    );
+  }
+  return null;
+}
 
 ProviderUsageSnapshot decodeProviderUsage(Map<String, Object?> data) {
   final summary = Map<String, Object?>.from(
@@ -79,6 +102,39 @@ ProviderUsageSnapshot decodeProviderUsage(Map<String, Object?> data) {
         .map(
           (item) => _decodeProviderUsageEntry(Map<String, Object?>.from(item)),
         )
+        .toList(),
+    quotaAccounts: (data['quota_accounts'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) {
+          final account = Map<String, Object?>.from(item);
+          return ProviderQuotaAccount(
+            id: account['id'] as String? ?? '',
+            provider: account['provider'] as String? ?? 'unknown',
+            name: account['name'] as String? ?? 'Account',
+            active: account['active'] == true,
+            status: account['status'] as String? ?? 'unknown',
+            plan: account['plan'] as String? ?? '',
+            model: account['model'] as String? ?? '',
+            lastUsedAt: _decodeDateTime(account['last_used_at']),
+            limitReached: account['limit_reached'] == true,
+            error: account['error'] as String? ?? '',
+            quotas: (account['quotas'] as List? ?? const [])
+                .whereType<Map>()
+                .map((item) {
+                  final quota = Map<String, Object?>.from(item);
+                  return ProviderQuotaWindow(
+                    id: quota['id'] as String? ?? '',
+                    label: quota['label'] as String? ?? 'Quota',
+                    usedPercent:
+                        (quota['used_percent'] as num?)?.toDouble() ?? 0,
+                    remainingPercent:
+                        (quota['remaining_percent'] as num?)?.toDouble() ?? 0,
+                    resetAt: _decodeDateTime(quota['reset_at']),
+                  );
+                })
+                .toList(),
+          );
+        })
         .toList(),
     attribution: data['attribution'] as String? ?? '',
     reason: data['reason'] as String? ?? '',
@@ -205,6 +261,7 @@ class HermesRemoteConnector
     implements
         AgentConnector,
         WorkspaceMonitor,
+        GitWorkspaceMonitor,
         WorkspaceCatalog,
         SecurityMonitor,
         ProviderUsageMonitor,
@@ -224,6 +281,8 @@ class HermesRemoteConnector
   RemoteExecutionMode executionMode = RemoteExecutionMode.single;
   RemotePermissionMode permissionMode = RemotePermissionMode.workspace;
   String coordinatorAgentId = '';
+  int maxConcurrentAgents = 2;
+  int concurrencyLimit = 2;
 
   @override
   Stream<AgentEvent> get events => _events.stream;
@@ -298,6 +357,9 @@ class HermesRemoteConnector
       (value) => value.name == status['permission'],
       orElse: () => RemotePermissionMode.workspace,
     );
+    maxConcurrentAgents =
+        ((status['max_concurrent_agents'] as num?)?.toInt() ?? 2).clamp(1, 8);
+    concurrencyLimit = concurrencyLimit.clamp(1, maxConcurrentAgents);
     final data = await _get('/api/agents');
     availableAgents = (data['agents'] as List? ?? [])
         .whereType<Map>()
@@ -420,6 +482,7 @@ class HermesRemoteConnector
                   AgentSession.fromJson(Map<String, Object?>.from(session)),
             )
             .toList(),
+        isGitRepository: value['is_git_repo'] == true,
       );
     }).toList();
   }
@@ -435,6 +498,17 @@ class HermesRemoteConnector
   }) async => decodeGitRepositoryStatus(
     await _get('/api/git-status', {'fetch': fetch ? '1' : '0'}),
   );
+  @override
+  Future<GitWorkspaceSnapshot> getGitWorkspaceSnapshot({
+    bool fetch = false,
+  }) async {
+    final data = await _get('/api/git-status', {'fetch': fetch ? '1' : '0'});
+    return GitWorkspaceSnapshot(
+      files: decodeGitStatus(data),
+      repository: decodeGitRepositoryStatus(data),
+    );
+  }
+
   @override
   Future<ProviderUsageSnapshot> getProviderUsage({
     String range = '24h',
@@ -472,7 +546,7 @@ class HermesRemoteConnector
   @override
   void selectWorkspace(String path) => _workspace = path;
   @override
-  Future<List<AgentSession>> listSessions({int limit = 200}) async {
+  Future<List<AgentSession>> listSessions({int limit = 50}) async {
     final data = await _get('/api/sessions', {'limit': '$limit'});
     final sessions = (data['sessions'] as List? ?? [])
         .whereType<Map>()
@@ -547,6 +621,9 @@ class HermesRemoteConnector
         'model': model,
         'agents': agents,
         'mode': executionMode.name,
+        'concurrency': executionMode == RemoteExecutionMode.single
+            ? 1
+            : concurrencyLimit,
         'coordinator': coordinatorAgentId,
         'permission': permissionMode.name,
       }),
@@ -775,6 +852,7 @@ AgentTask decodeAgentTask(Map item) {
     source: value['source'] as String? ?? 'agent_remote',
     elapsedSeconds: (value['elapsedSeconds'] as num?)?.toInt() ?? 0,
     idleSeconds: (value['idleSeconds'] as num?)?.toInt() ?? 0,
+    concurrency: (value['concurrency'] as num?)?.toInt() ?? 1,
     createdAt: DateTime.tryParse(value['createdAt'] as String? ?? ''),
     updatedAt: DateTime.tryParse(value['updatedAt'] as String? ?? ''),
     changedFiles: (value['changedFiles'] as num?)?.toInt() ?? 0,

@@ -284,7 +284,8 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('Project & Session'), findsOneWidget);
+    expect(find.text('Sessions'), findsOneWidget);
+    expect(find.byTooltip('Kategori dan pengaturan'), findsOneWidget);
     expect(find.text('1 task aktif • 1 agent berjalan'), findsWidgets);
     expect(find.text('Project Idle'), findsOneWidget);
     expect(find.text('Project Aktif'), findsOneWidget);
@@ -405,13 +406,18 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 300));
 
+    await tester.tap(find.text('Git').first);
+    await tester.pump(const Duration(milliseconds: 200));
+
     expect(find.text('File & Git'), findsOneWidget);
     expect(find.text('vanszas/agent-remote'), findsOneWidget);
-    expect(find.text('Changes'), findsOneWidget);
+    expect(find.text('Changes'), findsWidgets);
     expect(find.text('+81'), findsOneWidget);
     expect(find.text('-55'), findsOneWidget);
     expect(find.text('GitHub CLI: vanszas'), findsOneWidget);
     expect(find.text('Sources'), findsOneWidget);
+    await tester.tap(find.text('Changes').first);
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.scrollUntilVisible(
       find.text('Perubahan kode'),
       300,
@@ -437,6 +443,38 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('file dashboard lists Git repositories inside parent folder', (
+    tester,
+  ) async {
+    final controller = AppController(DemoAgentConnector(), LocalStore())
+      ..workspacePath = r'C:\Kerjaan\Monokotil'
+      ..gitRepository = const GitRepositoryStatus(
+        nestedRepositories: [
+          GitNestedRepository(
+            name: 'HermesRemote',
+            path: r'C:\Kerjaan\Monokotil\Apps\HermesRemote',
+          ),
+          GitNestedRepository(
+            name: 'DontIn',
+            path: r'C:\Kerjaan\Monokotil\Game\DontIn',
+          ),
+        ],
+      );
+
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: app.FilesPage(controller))),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.text('Git').first);
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('Folder induk memuat 2 Git repository'), findsOneWidget);
+    expect(find.text('HermesRemote'), findsOneWidget);
+    expect(find.text('DontIn'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('usage dashboard filters real token flow on narrow screens', (
     tester,
   ) async {
@@ -455,6 +493,8 @@ void main() {
     expect(find.text('1.203'), findsOneWidget);
     expect(find.text('160.028.505'), findsOneWidget);
     expect(find.text('504.719'), findsOneWidget);
+    await tester.tap(find.text('gpt-5.6-sol').first);
+    await tester.pumpAndSettle();
     expect(find.textContaining('Aktif sekarang'), findsOneWidget);
     expect(find.text('Sumber penggunaan'), findsOneWidget);
     expect(find.text('Semua PC'), findsOneWidget);
@@ -474,6 +514,35 @@ void main() {
 
     expect(connector.lastRange, '7d');
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('file dashboard refreshes Git automatically while visible', (
+    tester,
+  ) async {
+    final connector = _LiveFilesDemoConnector();
+    final controller = AppController(connector, LocalStore())
+      ..connected = true
+      ..page = 2
+      ..workspacePath = r'C:\repo';
+
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: app.FilesPage(controller))),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(connector.gitSnapshotCalls, 1);
+    expect(connector.gitStatusCalls, 0);
+    expect(connector.remoteFetchCalls, 1);
+    expect(find.text('Live'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(connector.gitSnapshotCalls, greaterThanOrEqualTo(2));
+    expect(connector.gitStatusCalls, 0);
+    expect(connector.remoteFetchCalls, 1);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('workspace file editor previews and saves without agent prompt', (
@@ -672,7 +741,7 @@ void main() {
 
     expect(find.text('Pilih agent PC'), findsOneWidget);
     expect(
-      find.text('2 agent dipilih • Hanya CLI terpasang yang dapat dijalankan.'),
+      find.text('2 agent dipilih • 2 berjalan bersamaan • batas server 2.'),
       findsOneWidget,
     );
     expect(
@@ -681,10 +750,11 @@ void main() {
     );
     expect(tester.takeException(), isNull);
 
-    await tester.tap(find.text('Satu agent'));
+    await tester.tap(find.text('Hemat'));
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(remote.executionMode, RemoteExecutionMode.single);
+    expect(remote.concurrencyLimit, 1);
     expect(remote.selectedAgentIds, {'claude'});
     expect(find.text('Gunakan 1 agent'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -1227,4 +1297,57 @@ class _FileEditorDemoConnector extends DemoAgentConnector
     savedContent = content;
     return document(content: content);
   }
+}
+
+class _LiveFilesDemoConnector extends DemoAgentConnector
+    implements WorkspaceMonitor, GitWorkspaceMonitor {
+  int gitStatusCalls = 0;
+  int gitSnapshotCalls = 0;
+  int remoteFetchCalls = 0;
+
+  @override
+  Future<GitWorkspaceSnapshot> getGitWorkspaceSnapshot({
+    bool fetch = false,
+  }) async {
+    gitSnapshotCalls++;
+    if (fetch) remoteFetchCalls++;
+    return GitWorkspaceSnapshot(
+      files: [
+        GitStatusEntry(
+          'lib/live-$gitSnapshotCalls.dart',
+          GitFileStatus.modified,
+        ),
+      ],
+      repository: const GitRepositoryStatus(
+        isGitRepository: true,
+        branch: 'main',
+        upstream: 'origin/main',
+      ),
+    );
+  }
+
+  @override
+  Future<List<GitStatusEntry>> getGitStatus({bool fetch = false}) async {
+    gitStatusCalls++;
+    return [
+      GitStatusEntry('lib/live-$gitStatusCalls.dart', GitFileStatus.modified),
+    ];
+  }
+
+  @override
+  Future<GitRepositoryStatus> getGitRepositoryStatus({
+    bool fetch = false,
+  }) async {
+    if (fetch) remoteFetchCalls++;
+    return const GitRepositoryStatus(
+      isGitRepository: true,
+      branch: 'main',
+      upstream: 'origin/main',
+    );
+  }
+
+  @override
+  Future<List<WorkspaceEntry>> listWorkspace(String path) async => const [
+    WorkspaceEntry('lib', 'lib', true),
+  ];
 }

@@ -16,7 +16,8 @@ Status dokumentasi: **18 Juli 2026**. Versi aplikasi: **0.3.0+2**.
 - Restore folder, tab, dan session terakhir.
 - Upload file, galeri, kamera, dan gambar clipboard Android.
 - Panel task aktif, file workspace, Git status, commit, ahead/behind, dan fetch remote.
-- Server Windows berupa `ServerStart.exe` tanpa jendela console.
+- Server Windows berupa `ServerStart.exe` dan launcher aman `ServerStop.exe` tanpa jendela console.
+- Tailscale akun terdaftar otomatis aktif saat server dinyalakan dan nonaktif saat server dihentikan.
 
 ## Arsitektur
 
@@ -68,7 +69,7 @@ USB hanya diperlukan untuk instalasi APK melalui ADB. Setelah terpasang, Agent R
 
 - Flutter SDK dan Android SDK.
 - Python untuk server dan test backend.
-- PyInstaller untuk membangun `ServerStart.exe`.
+- PyInstaller untuk membangun `ServerStart.exe` dan `ServerStop.exe`.
 - Git dan CLI agent yang ingin diuji.
 
 Pastikan agent dapat dijalankan langsung dari PowerShell sebelum membuka Agent Remote, misalnya `codex --version` atau `claude --version`.
@@ -81,7 +82,8 @@ Alur aktivasi: **siapkan CLI agent di PC -> nyalakan server -> hubungkan PC dan 
 
 Pada PC, siapkan dalam satu folder:
 
-- `ServerStart.exe` untuk server Windows.
+- `ServerStart.exe` untuk menyalakan server Windows.
+- `ServerStop.exe` untuk menghentikan server dan process anaknya.
 - APK Agent Remote untuk Android.
 
 Jika repository ini dibangun sendiri, APK debug berada di `build\app\outputs\flutter-apk\app-debug.apk`. Pengguna file rilis dapat langsung memasang APK yang dibagikan tanpa ADB.
@@ -118,7 +120,9 @@ Jika command `tailscale` tidak ditemukan, buka aplikasi Tailscale Windows dari S
 
 ### 3. Buat token dan jalankan server PC
 
-Untuk percobaan pertama, double-click `ServerStart.exe`. Server memakai port `9120` dan token development `admin`.
+Untuk percobaan pertama, jalankan `ServerStart.exe`. Server memakai port `9120`; token pertama dibuat acak dan disimpan lokal pada `%LOCALAPPDATA%\\AgentRemote\\server-token.txt`.
+
+`ServerStart.exe` menjalankan `tailscale up` bila PC sudah pernah login. Perintah ini memakai node key dan konfigurasi Tailscale yang sudah tersimpan; launcher tidak membuka login, tidak mengganti akun, dan tidak memakai `--reset`.
 
 Untuk pemakaian rutin, jalankan dari PowerShell dengan token sendiri:
 
@@ -136,7 +140,7 @@ $headers = @{ Authorization = "Bearer $token" }
 Invoke-RestMethod http://127.0.0.1:9120/api/status -Headers $headers
 ```
 
-Jika memakai double-click dan token default, ganti nilai `$token` menjadi `admin`. Response JSON berarti server aktif.
+Jika server membuat token otomatis, baca token lokal dengan `$token = Get-Content "$env:LOCALAPPDATA\\AgentRemote\\server-token.txt"`. Response JSON berarti server aktif.
 
 ### 4. Izinkan port pada Windows Firewall
 
@@ -183,7 +187,7 @@ Username  : admin
 Password  : token server
 ```
 
-Ganti endpoint dengan IP dari `tailscale ip -4`. Isi **Password** dengan nilai `AGENT_REMOTE_TOKEN`; bila server dijalankan dengan double-click tanpa konfigurasi, isi `admin`. **Username** saat ini hanya nama metadata profile dan tidak dipakai untuk autentikasi.
+Ganti endpoint dengan IP dari `tailscale ip -4`. Isi **Password** dengan nilai `AGENT_REMOTE_TOKEN` atau token lokal pada `%LOCALAPPDATA%\\AgentRemote\\server-token.txt`. **Username** saat ini hanya nama metadata profile dan tidak dipakai untuk autentikasi.
 
 Pilih **Set as default**, tekan **Connect**, lalu izinkan notifikasi Android. Setelah status online, pilih folder kerja dan buat **New Chat**.
 
@@ -208,7 +212,7 @@ Konfigurasi default:
 
 - Host: `0.0.0.0`
 - Port: `9120`
-- Token development: `admin`
+- Token: dibuat acak saat first run dan disimpan lokal pada `%LOCALAPPDATA%\\AgentRemote\\server-token.txt`
 - State server: `%LOCALAPPDATA%\AgentRemote\server.json`
 
 Gunakan token sendiri sebelum pemakaian rutin:
@@ -221,11 +225,22 @@ Start-Process .\ServerStart.exe -WindowStyle Hidden
 
 Nama environment legacy `HERMES_REMOTE_TOKEN` dan `HERMES_REMOTE_HOST` masih dibaca untuk kompatibilitas. Konfigurasi baru wajib memakai prefix `AGENT_REMOTE_`.
 
-Hentikan server:
+Kontrol Tailscale aktif secara default. Untuk penggunaan LAN tanpa Tailscale:
 
 ```powershell
-Get-Process ServerStart -ErrorAction SilentlyContinue | Stop-Process
+$env:AGENT_REMOTE_DISABLE_TAILSCALE = "1"
+Start-Process .\ServerStart.exe -WindowStyle Hidden
 ```
+
+Hentikan server dengan double-click `ServerStop.exe`, atau lewat PowerShell:
+
+```powershell
+Start-Process .\ServerStop.exe
+```
+
+`ServerStop.exe` hanya mencari `ServerStart.exe` pada folder yang sama berdasarkan absolute path. Process server beserta process agent yang dimulai oleh server dihentikan, lalu launcher menjalankan `tailscale down`. Agent lain yang dijalankan terpisah tidak disentuh. Launcher tidak memanggil API shutdown dan tidak mengirim notifikasi ke HP.
+
+Hasil aktivasi Tailscale dicatat lokal pada `%LOCALAPPDATA%\AgentRemote\launcher.log` tanpa token, auth key, atau isi task.
 
 Jangan restart atau hentikan server ketika task aktif. Proses agent berjalan di PC; monitoring tertunda sampai server tersedia kembali.
 
@@ -287,13 +302,43 @@ Agent pilihan selalu dicatat pada session dan timeline. Jika Codex gagal, UI men
 
 Panel monitoring tidak mengirim prompt tambahan. Fase dan detail proses dibentuk lokal dari event CLI, tool, stdout, dan lifecycle process yang memang sudah berjalan. Mode **Single** tidak menambah pemakaian token agent. Mode **Parallel** dan **Koordinator** tetap memakai token lebih banyak karena memang menjalankan beberapa agent sesuai pilihan pengguna.
 
+### Mode performa dan antrean agent
+
+- **Hemat** menjalankan satu agent untuk setiap task dan memberi beban PC paling rendah.
+- **Normal 2** menjalankan maksimal dua proses agent secara bersamaan.
+- **Multi-agent custom** membolehkan pengguna memilih batas proses aktif dari HP sampai batas aman server. Agent lain tetap terlihat sebagai **Menunggu antrean**.
+- **Koordinator** menjalankan worker sesuai batas concurrency, kemudian menjalankan agent koordinator setelah hasil worker tersedia.
+- Hard cap server default adalah empat agent dan dapat diubah sebelum server dijalankan melalui environment variable `AGENT_REMOTE_MAX_AGENTS`. Nilai aman yang direkomendasikan adalah `1` untuk PC hemat, `2` untuk penggunaan normal, dan `3-4` hanya bila CPU/RAM mencukupi.
+
+```powershell
+$env:AGENT_REMOTE_MAX_AGENTS = "1"
+Start-Process .\ServerStart.exe -WindowStyle Hidden
+```
+
+Server, Codex CLI, Git, GitHub CLI, `taskkill`, Tailscale, dan bridge notifikasi dijalankan tanpa console window. Satu server tetap aktif, sedangkan setiap agent mendapat proses terpisah agar output, working directory, permission, dan aksi stop tidak tercampur.
+
+### Optimasi sinkronisasi
+
+- Flutter memantau task hanya ketika aplikasi berada di foreground.
+- Android foreground service mengambil alih monitoring ketika aplikasi berada di background.
+- Task aktif diperbarui sekitar setiap 3 detik; kondisi idle memakai interval sekitar 12 detik.
+- Request task memiliki in-flight lock sehingga request lambat tidak dapat menumpuk.
+- Session pertama memuat 50 ringkasan; tombol muat lagi menambah 50 session.
+- Halaman yang sudah dibuka disimpan dalam cache tab. Timer Git hanya bekerja ketika tab **File** sedang terlihat.
+
+Polling, cache, loading screen, preview file, dan telemetry tidak memanggil model AI sehingga tidak menambah token 9Router.
+
+### Loading aplikasi
+
+Saat aplikasi dibuka, layar loading menampilkan tahap nyata: **notifikasi**, **session lokal**, **profil koneksi**, **koneksi PC**, **workspace**, dan **sinkron task**. Loading screen hanya memberi status; pengurangan beban berasal dari polling adaptif, cache tab, payload kecil, dan task queue.
+
 Untuk Codex, pilih permission sesuai kebutuhan:
 
 - **Ask for approval**: aksi sensitif menunggu persetujuan.
 - **Otomatis di workspace**: agent bebas bekerja di folder terpilih, tetap dibatasi workspace.
 - **Full access**: bypass sandbox; gunakan hanya pada PC dan project tepercaya.
 
-Provider API seperti 9router dikonfigurasi pada CLI agent atau environment PC. Agent Remote menjalankan CLI tersebut dan tidak mengganti konfigurasi provider internalnya.
+Provider agent lain tetap mengikuti konfigurasi CLI masing-masing. Khusus task Codex dari HP, Agent Remote memaksa provider `9router` pada process tersebut dan memasang dedicated key melalui environment process. Routing ini tidak mengubah konfigurasi global Codex Desktop.
 
 Tab **Token** membaca database usage 9Router secara read-only dari PC. Fitur ini tidak memanggil model, tidak mengirim prompt tambahan, dan tidak menambah pemakaian token. Dashboard menampilkan:
 
@@ -303,6 +348,9 @@ Tab **Token** membaca database usage 9Router secara read-only dari PC. Fitur ini
 - Filter sumber **Semua PC** atau **Dari HP**.
 - Filter provider dan model.
 - Daftar request terbaru dengan token masuk/keluar, cache, status, dan waktu lokal perangkat.
+- **Quota 9Router** per account/provider: status aktif, plan, model terakhir, persentase terpakai/tersisa, dan waktu reset.
+
+Quota Codex dibaca langsung dari endpoint usage account memakai access token lokal 9Router, lalu di-cache 55 detik agar halaman tidak berat. Credential tidak masuk response Agent Remote. Provider yang tidak menyediakan API quota tetap ditampilkan dengan status account dan model terakhir, tanpa angka quota palsu.
 
 Secara default backend mencari `%APPDATA%\9router\db\data.sqlite`. Lokasi lain dapat dipakai melalui `AGENT_REMOTE_9ROUTER_DB`.
 
@@ -314,11 +362,14 @@ Secara default backend mencari `%APPDATA%\9router\db\data.sqlite`. Lokasi lain d
 2. Masuk ke halaman **Keys**.
 3. Buat API key aktif dengan nama persis `Agent Remote Mobile`.
 4. Buka tab **Token** pada HP, lalu pilih **Dari HP**.
-5. Jalankan task baru dari HP. Request berikutnya otomatis memakai key tersebut dan masuk filter HP.
+5. Restart `ServerStart.exe` setelah key dibuat atau diganti.
+6. Jalankan task Codex baru dari HP. Request berikutnya otomatis memakai key tersebut dan masuk filter HP.
 
-Backend hanya membaca key secara lokal untuk environment process Codex dan filter SQLite. Nilai key tidak pernah dikirim ke HP, response API, log, atau UI. Nama key lain dapat dipakai melalui `AGENT_REMOTE_9ROUTER_MOBILE_KEY_NAME`. Key juga dapat disediakan langsung pada PC melalui `AGENT_REMOTE_9ROUTER_MOBILE_KEY`.
+Backend hanya membaca key secara lokal untuk environment process Codex dan filter SQLite. Nilai key tidak pernah dikirim ke HP, response API, log, atau UI. Nama key lain dapat dipakai melalui `AGENT_REMOTE_9ROUTER_MOBILE_KEY_NAME`. Key juga dapat disediakan langsung pada PC melalui `AGENT_REMOTE_9ROUTER_MOBILE_KEY`. Endpoint default `http://127.0.0.1:20128/v1` dapat diganti melalui `AGENT_REMOTE_9ROUTER_BASE_URL`.
 
 Tanpa dedicated key, filter **Semua PC** tetap bekerja, sedangkan **Dari HP** menampilkan panduan aktivasi. Pencocokan berdasarkan waktu tidak dipakai karena dapat salah menganggap request desktop sebagai request HP.
+
+Task lama tidak dipindahkan secara retroaktif ke filter **Dari HP**. Hanya task Codex baru yang dibuat sesudah server memakai dedicated key yang dapat teratribusi dengan aman.
 
 Halaman **Pengaturan > Koneksi PC** menampilkan status PC, provider terpilih, kemampuan koneksi, profil aktif, transport, dan endpoint. Status provider memakai label yang mudah dipahami; raw enum internal tidak ditampilkan. Penghapusan profil selalu meminta konfirmasi.
 
@@ -332,6 +383,8 @@ Halaman **Pengaturan > Koneksi PC** menampilkan status PC, provider terpilih, ke
 Pemilih folder tampil langsung tanpa menunggu response PC selesai. Loading, kegagalan koneksi, tombol retry, pilihan disk, folder induk, pencarian lokal, dan folder aktif terakhir ditampilkan jelas. Pencarian hanya memfilter daftar yang sudah diterima sehingga tidak menambah request backend atau penggunaan token.
 
 Session disimpan per folder pada `.agent-remote\sessions.json`. Data lama dari `.hermes-remote\sessions.json` dimigrasikan bila ditemukan. Folder berbeda memiliki daftar session berbeda; session project A tidak dicampur dengan project B.
+
+Tab **File & Git** memperbarui perubahan file lokal setiap 10 detik selama halaman terlihat. Referensi remote di-fetch setiap 60 detik, saat halaman dibuka kembali, dan saat tombol refresh ditekan. Polling Git tidak memanggil model sehingga tidak memakai token AI.
 
 Halaman **Project & Session** menutup folder idle secara default agar daftar tidak menumpuk. Folder aktif atau folder yang sedang menjalankan task otomatis terbuka, menampilkan badge jumlah task/agent aktif, dan memindahkan session yang sedang bekerja ke urutan teratas.
 
@@ -372,6 +425,8 @@ Setiap run memiliki `run_id`, `session_id`, agent, timestamp, status, dan detail
 
 Timeline disimpan di backend. Keluar dari session atau berpindah aplikasi tidak menghapus progress. Saat session dibuka kembali, aplikasi memuat aktivitas tersimpan, bukan hanya label `Thinking`.
 
+Jika Codex Desktop berhenti tanpa menulis event terminal, backend tidak mempertahankan status `running` selamanya. Rollout yang sudah tidak berubah ditutup dari daftar aktif setelah batas aman. Session `generating` yang tersisa akibat server restart juga dipulihkan menjadi berhenti, lalu aplikasi merekonsiliasi status chat dengan task backend setiap polling.
+
 Request approval menampilkan level risiko, status, command preview, waktu kedaluwarsa mengikuti zona waktu perangkat, dan konfirmasi kedua untuk aksi berisiko tinggi atau kritis. Request klarifikasi mendukung pilihan cepat serta jawaban teks bebas. Tombol dikunci selama response dikirim untuk mencegah jawaban ganda.
 
 Saat task aktif, layar chat menampilkan banner multi-agent berisi jumlah agent aktif, mode kerja, agent yang sedang berjalan, fase, dan aktivitas terbaru. Tekan **Lihat proses** untuk melihat ringkasan semua agent dan timeline command/tool tanpa meninggalkan session.
@@ -381,6 +436,8 @@ Setiap command/tool di chat memakai kartu aktivitas responsif. Kartu menampilkan
 Gunakan **Lihat proses** untuk membuka detail command dan output tool. Ringkasan progress tetap singkat; raw chain-of-thought internal tidak ditampilkan. Rendering kartu hanya memakai event yang sudah diterima aplikasi, sehingga tidak mengirim prompt tambahan dan tidak menambah penggunaan token agent.
 
 Saat task berjalan, Android foreground service menampilkan notifikasi ongoing berisi agent dan aktivitas terbaru. Saat selesai, notifikasi menampilkan hasil akhir. Action yang tersedia: **Buka** dan **Stop**.
+
+Suara selesai dapat diganti melalui **Pengaturan > Notifikasi task**. Pilih file WAV atau MP4 berisi audio dari penyimpanan HP. Android menyimpan izin URI file dan membuat notification channel baru berdasarkan pilihan suara, sehingga perubahan tetap bekerja walau channel lama sudah pernah dibuat. Tombol reset mengembalikan suara default Android.
 
 Durasi otomatis memakai detik, menit, lalu jam. Timestamp aktivitas dikonversi ke timezone perangkat pengguna. Tombol **Stop** menghentikan process tree agent di PC, termasuk child `cmd.exe`, Node.js, PowerShell, atau tool lain yang dibuat agent.
 
@@ -394,15 +451,19 @@ Codex mendukung command `notify` yang dipanggil ketika turn selesai. Arahkan hoo
 notify = ["C:\\path\\ke\\AgentRemote\\ServerStart.exe", "--codex-notify"]
 ```
 
-`ServerStart.exe --codex-notify` meneruskan event selesai ke server lokal, menyimpannya pada panel **Proses**, lalu foreground sync Android mengirim notifikasi ke HP. Bridge tetap meneruskan event `turn-ended` ke helper Computer Use Codex bila helper tersebut tersedia.
+`ServerStart.exe --codex-notify` meneruskan event selesai ke server lokal, menyimpannya pada panel **Proses**, lalu foreground sync Android mengirim notifikasi ke HP. Selain hook selesai, backend membaca event `task_started`, progress tool, `task_complete`, dan `turn_aborted` dari rollout Codex secara read-only. Task Codex yang dimulai langsung dari PC kini terlihat live di panel **Proses**, bukan baru muncul setelah selesai. Bridge tetap meneruskan event `turn-ended` ke helper Computer Use Codex bila helper tersebut tersedia.
 
 Setelah mengubah `~/.codex/config.toml`, restart Codex Desktop agar config baru pasti dimuat. Buka Agent Remote sekali dan connect ke PC untuk mengaktifkan foreground sync. Setelah aktif, task Codex Desktop/CLI yang selesai tetap memunculkan notifikasi saat aplikasi berada di background.
+
+## Membaca Usage tanpa panel menumpuk
+
+Tab **Token** menampilkan scope HP/PC, range waktu, provider, model, dan ringkasan token terlebih dahulu. Detail model aktif, quota 9Router, serta atribusi dibuka lewat panel **Model, quota, dan atribusi**; request terbaru tetap berada di bawahnya. Filter hanya mengambil telemetry read-only dan tidak menambah token AI.
 
 ## Git dan panel proses
 
 Tab **Proses** menampilkan ringkasan task aktif, agent aktif, dan task yang perlu perhatian. Filter **Semua**, **Aktif**, **Perhatian**, dan **Selesai** membantu memisahkan pekerjaan; task berjalan otomatis berada paling atas. Setiap card dapat dibuka untuk melihat agent satu per satu, role `Agent`/`Worker`/`Coordinator`, fase aktif, command atau aktivitas terbaru, durasi, idle time, workspace, permission, dan jumlah file berubah. Task tetap dapat dipantau setelah keluar dari chat selama server dan aplikasi monitoring tetap aktif.
 
-Tab **File** menampilkan panel **Environment** dan dashboard Git responsif: jumlah baris masuk/keluar, folder lokal, branch/upstream, status commit/push, autentikasi GitHub CLI, perbandingan branch, source folder, commit keluar/masuk, serta filter **Semua**, **Diubah**, **Ditambah**, **Dihapus**, dan **Belum dilacak**. File berubah dipisahkan dari browser folder agar perubahan code tetap terlihat tanpa menambah proses agent atau penggunaan token. Jika folder adalah repository Git, Agent Remote menampilkan:
+Tab **File** menampilkan panel **Environment** dan dashboard Git responsif: jumlah baris masuk/keluar, folder lokal, branch/upstream, status commit/push, autentikasi GitHub CLI, perbandingan branch, source folder, commit keluar/masuk, serta filter **Semua**, **Diubah**, **Ditambah**, **Dihapus**, dan **Belum dilacak**. Tampilan sekarang dipisah menjadi tiga mode agar tidak menumpuk: **Explorer** untuk folder dan preview, **Changes** untuk perubahan code, serta **Git** untuk remote, branch, commit, dan quota sinkronisasi. File berubah dipisahkan dari browser folder agar perubahan code tetap terlihat tanpa menambah proses agent atau penggunaan token. Jika folder adalah repository Git, Agent Remote menampilkan:
 
 - Working tree status.
 - Commit terbaru.
@@ -412,6 +473,10 @@ Tab **File** menampilkan panel **Environment** dan dashboard Git responsif: juml
 - Status login GitHub CLI tanpa membaca atau mengirim token GitHub.
 - Source folder/file teratas dari workspace aktif.
 - Hasil fetch remote.
+
+Jika folder pilihan adalah folder induk, bukan root repository, Agent Remote mencari repository Git di bawahnya sampai kedalaman aman dan menampilkan daftar repository yang dapat dipilih. Contoh: memilih `C:\Kerjaan\Monokotil` akan menampilkan repository seperti `Apps\HermesRemote`, `Game\DontIn`, atau `Web\monokotil-next`, bukan menyatakan seluruh folder induk terhubung ke satu repository.
+
+Backend menggabungkan status file dan metadata repository menjadi satu scan, mencegah scan paralel untuk workspace sama, memakai cache singkat, serta hanya mengirim ringkasan session pada daftar project. Perpindahan folder tidak lagi membuka request Git ganda atau mengirim seluruh message/activity dari semua project.
 
 ### Preview dan edit file dari HP
 
@@ -471,7 +536,9 @@ Instal PyInstaller dengan `uv`, build executable, lalu salin hasilnya ke root re
 ```powershell
 uv tool install pyinstaller
 pyinstaller --clean --noconfirm HermesRemoteServer.spec
+pyinstaller --clean --noconfirm ServerStop.spec
 Copy-Item .\dist\ServerStart.exe .\ServerStart.exe -Force
+Copy-Item .\dist\ServerStop.exe .\ServerStop.exe -Force
 ```
 
 Walau nama spec internal masih `HermesRemoteServer.spec`, executable dan branding pengguna adalah Agent Remote.
@@ -556,7 +623,7 @@ Get-Process ServerStart -ErrorAction SilentlyContinue
 
 ## Keamanan dan batasan
 
-- Token default `admin` hanya untuk development. Ganti sebelum PC dapat diakses pengguna lain.
+- Token server dibuat acak pada first run dan disimpan lokal pada `%LOCALAPPDATA%\\AgentRemote\\server-token.txt`. Jangan membagikannya.
 - Server menyimpan audit akses di `%LOCALAPPDATA%\AgentRemote\security_audit.jsonl`. Data hanya berisi waktu, status akses, peer IP, metode HTTP, path tanpa query, dan user-agent. Token, password, prompt, attachment, serta output agent tidak dicatat.
 - Akses berhasil dari IP yang sama dicatat maksimal sekali setiap 15 menit. Akses ditolak dicatat maksimal sekali setiap 10 detik per IP. Log aktif dibatasi 2 MB lalu diputar ke satu file backup agar serangan berulang tidak memenuhi disk.
 - Panel **Pengaturan > Keamanan API** membaca log sekali saat dibuka dan hanya memuat ulang ketika pengguna menekan refresh. Fitur ini tidak menjalankan agent dan tidak memakai token LLM.

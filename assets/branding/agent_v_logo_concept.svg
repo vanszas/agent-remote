@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="128" y1="80" x2="896" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#161A24"/>
+      <stop offset="1" stop-color="#07090E"/>
+    </linearGradient>
+    <linearGradient id="agent" x1="268" y1="724" x2="636" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BA082E"/>
+      <stop offset="0.52" stop-color="#F11E46"/>
+      <stop offset="1" stop-color="#FF526D"/>
+    </linearGradient>
+    <linearGradient id="vector" x1="244" y1="315" x2="823" y2="735" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9FBFF"/>
+      <stop offset="0.48" stop-color="#DCE6F3"/>
+      <stop offset="1" stop-color="#8293AB"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="410" y1="431" x2="603" y2="614" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7A001C"/>
+      <stop offset="1" stop-color="#26000A"/>
+    </linearGradient>
+    <filter id="shadow" x="100" y="100" width="824" height="824" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="30" stdDeviation="30" flood-color="#000000" flood-opacity="0.48"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <path d="M166 809C166 746 191 685 236 640L414 462C468 408 556 408 610 462L788 640C833 685 858 746 858 809" fill="none" stroke="#222836" stroke-width="22" stroke-linecap="round" opacity="0.42"/>
+  <g filter="url(#shadow)">
+    <path d="M128 746L445 203C476 150 553 150 584 203L902 746H745L515 352L285 746H128Z" fill="url(#agent)"/>
+    <path d="M110 304H280L512 602L744 304H914L567 757C539 794 484 794 456 757L110 304Z" fill="url(#vector)"/>
+    <path d="M391 446L512 602L634 445L714 548L567 740C539 777 484 777 456 740L311 550L391 446Z" fill="url(#edge)" opacity="0.92"/>
+    <path d="M419 482L512 602L606 481L672 566L564 707C537 742 486 742 459 707L353 568L419 482Z" fill="#0C1018"/>
+  </g>
+  <circle cx="512" cy="845" r="14" fill="#39F5A6"/>
+  <circle cx="512" cy="845" r="30" fill="#39F5A6" opacity="0.12"/>
+</svg>

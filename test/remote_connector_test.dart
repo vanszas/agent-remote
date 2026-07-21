@@ -36,11 +36,15 @@ void main() {
       'github_cli_installed': true,
       'github_cli_authenticated': true,
       'github_cli_user': 'ivan',
+      'nested_repositories': [
+        {'name': 'DontIn', 'path': r'C:\Kerjaan\Monokotil\Game\DontIn'},
+      ],
     });
     expect(repository.upstream, 'origin/main');
     expect(repository.additions, 81);
     expect(repository.deletions, 55);
     expect(repository.githubCliAuthenticated, isTrue);
+    expect(repository.nestedRepositories.single.name, 'DontIn');
   });
 
   test('decodes per-agent task state and legacy payload', () {
@@ -48,6 +52,7 @@ void main() {
       'id': 'run-1',
       'title': 'Upgrade backend',
       'status': 'running',
+      'concurrency': 2,
       'agents': ['codex', 'claude'],
       'activeAgent': 'claude',
       'agentStates': [
@@ -70,6 +75,7 @@ void main() {
     expect(task.agentStates, hasLength(2));
     expect(task.activeAgentState?.name, 'Claude Code');
     expect(task.activeAgentState?.phase, 'editing');
+    expect(task.concurrency, 2);
 
     final legacy = decodeAgentTask({
       'id': 'run-old',
@@ -148,6 +154,26 @@ void main() {
         'is_active': true,
       },
       'recent': [],
+      'quota_accounts': [
+        {
+          'id': 'account-1',
+          'provider': 'codex',
+          'name': 'Codex Account',
+          'active': true,
+          'status': 'active',
+          'plan': 'plus',
+          'model': 'gpt-5.6-sol',
+          'quotas': [
+            {
+              'id': 'session',
+              'label': 'Sesi 5 jam',
+              'used_percent': 35,
+              'remaining_percent': 65,
+              'reset_at': 1784397600,
+            },
+          ],
+        },
+      ],
       'attribution': 'all_9router_requests_on_pc',
       'scope': 'mobile',
       'mobile_filter_available': true,
@@ -162,6 +188,12 @@ void main() {
     expect(usage.scope, 'mobile');
     expect(usage.mobileFilterAvailable, isTrue);
     expect(usage.mobileKeyName, 'Agent Remote Mobile');
+    expect(usage.quotaAccounts.single.plan, 'plus');
+    expect(usage.quotaAccounts.single.quotas.single.remainingPercent, 65);
+    expect(
+      usage.quotaAccounts.single.quotas.single.resetAt,
+      DateTime.fromMillisecondsSinceEpoch(1784397600000, isUtc: true),
+    );
   });
 
   test('decodes workspace file preview and edit metadata', () {

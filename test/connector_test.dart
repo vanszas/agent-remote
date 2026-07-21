@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_remote/agent_connector.dart';
 import 'package:hermes_remote/app_controller.dart';
 import 'package:hermes_remote/local_store.dart';
+import 'package:hermes_remote/models.dart';
 
 class _WorkspaceConnector extends DemoAgentConnector {
   String? selected;
@@ -17,6 +18,14 @@ class _WorkspaceConnector extends DemoAgentConnector {
 
   @override
   void selectWorkspace(String path) => selected = path;
+}
+
+class _TaskConnector extends DemoAgentConnector {
+  _TaskConnector(this.tasks);
+  final List<AgentTask> tasks;
+
+  @override
+  Future<List<AgentTask>> listTasks() async => tasks;
 }
 
 void main() {
@@ -69,4 +78,57 @@ void main() {
     expect(connector.selected, 'pc');
     controller.dispose();
   });
+
+  test(
+    'task polling clears stale generating session but keeps active one',
+    () async {
+      final directory = await Directory.systemTemp.createTemp();
+      addTearDown(() => directory.delete(recursive: true));
+      final connector = _TaskConnector(const [
+        AgentTask(
+          id: 'run-active',
+          title: 'Active',
+          status: 'running',
+          sessionId: 'session-active',
+        ),
+      ]);
+      final controller = AppController(
+        connector,
+        LocalStore(directory: directory),
+      )..connected = true;
+      final old = DateTime.now().subtract(const Duration(minutes: 1));
+      controller.sessions.addAll([
+        AgentSession(
+          id: 'session-stale',
+          title: 'Stale',
+          createdAt: old,
+          updatedAt: old,
+          status: SessionStatus.generating,
+        ),
+        AgentSession(
+          id: 'session-active',
+          title: 'Active',
+          createdAt: old,
+          updatedAt: old,
+          status: SessionStatus.generating,
+        ),
+      ]);
+
+      await controller.reloadTasks();
+
+      expect(
+        controller.sessions
+            .firstWhere((value) => value.id == 'session-stale')
+            .status,
+        SessionStatus.idle,
+      );
+      expect(
+        controller.sessions
+            .firstWhere((value) => value.id == 'session-active')
+            .status,
+        SessionStatus.generating,
+      );
+      controller.dispose();
+    },
+  );
 }

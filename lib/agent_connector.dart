@@ -13,9 +13,14 @@ class AgentWorkspace {
 }
 
 class AgentProject {
-  const AgentProject({required this.workspace, this.sessions = const []});
+  const AgentProject({
+    required this.workspace,
+    this.sessions = const [],
+    this.isGitRepository = false,
+  });
   final AgentWorkspace workspace;
   final List<AgentSession> sessions;
+  final bool isGitRepository;
 }
 
 abstract interface class WorkspaceCatalog {
@@ -61,6 +66,7 @@ class AgentTask {
     this.source = 'agent_remote',
     this.elapsedSeconds = 0,
     this.idleSeconds = 0,
+    this.concurrency = 1,
     this.createdAt,
     this.updatedAt,
     this.changedFiles = 0,
@@ -77,7 +83,7 @@ class AgentTask {
       source;
   final List<String> agents;
   final List<AgentTaskAgentState> agentStates;
-  final int elapsedSeconds, idleSeconds;
+  final int elapsedSeconds, idleSeconds, concurrency;
   final int changedFiles;
   final DateTime? createdAt, updatedAt;
 
@@ -112,6 +118,11 @@ class GitCommit {
   final String hash, subject, author;
 }
 
+class GitNestedRepository {
+  const GitNestedRepository({required this.name, required this.path});
+  final String name, path;
+}
+
 class GitRepositoryStatus {
   const GitRepositoryStatus({
     this.isGitRepository = false,
@@ -130,6 +141,7 @@ class GitRepositoryStatus {
     this.githubAvatarUrl = '',
     this.incoming = const [],
     this.outgoing = const [],
+    this.nestedRepositories = const [],
   });
   final bool isGitRepository;
   final bool githubCliInstalled, githubCliAuthenticated;
@@ -142,6 +154,13 @@ class GitRepositoryStatus {
       githubCliUser;
   final int ahead, behind, additions, deletions;
   final List<GitCommit> incoming, outgoing;
+  final List<GitNestedRepository> nestedRepositories;
+}
+
+class GitWorkspaceSnapshot {
+  const GitWorkspaceSnapshot({required this.files, required this.repository});
+  final List<GitStatusEntry> files;
+  final GitRepositoryStatus repository;
 }
 
 class ProviderUsageSummary {
@@ -176,6 +195,39 @@ class ProviderUsageEntry {
   final bool isActive;
 }
 
+class ProviderQuotaWindow {
+  const ProviderQuotaWindow({
+    required this.id,
+    required this.label,
+    required this.usedPercent,
+    required this.remainingPercent,
+    this.resetAt,
+  });
+  final String id, label;
+  final double usedPercent, remainingPercent;
+  final DateTime? resetAt;
+}
+
+class ProviderQuotaAccount {
+  const ProviderQuotaAccount({
+    required this.id,
+    required this.provider,
+    required this.name,
+    required this.active,
+    required this.status,
+    required this.plan,
+    required this.model,
+    required this.quotas,
+    this.lastUsedAt,
+    this.limitReached = false,
+    this.error = '',
+  });
+  final String id, provider, name, status, plan, model, error;
+  final bool active, limitReached;
+  final DateTime? lastUsedAt;
+  final List<ProviderQuotaWindow> quotas;
+}
+
 class ProviderUsageSnapshot {
   const ProviderUsageSnapshot({
     required this.available,
@@ -185,6 +237,7 @@ class ProviderUsageSnapshot {
     required this.providers,
     required this.models,
     required this.recent,
+    this.quotaAccounts = const [],
     required this.attribution,
     this.active,
     this.reason = '',
@@ -200,6 +253,7 @@ class ProviderUsageSnapshot {
   final ProviderUsageEntry? active;
   final List<String> providers, models;
   final List<ProviderUsageEntry> recent;
+  final List<ProviderQuotaAccount> quotaAccounts;
   final DateTime? updatedAt;
 }
 
@@ -297,6 +351,10 @@ abstract interface class WorkspaceMonitor {
   Future<List<GitStatusEntry>> getGitStatus({bool fetch = false});
   Future<GitRepositoryStatus> getGitRepositoryStatus({bool fetch = false});
   Future<List<WorkspaceEntry>> listWorkspace(String path);
+}
+
+abstract interface class GitWorkspaceMonitor {
+  Future<GitWorkspaceSnapshot> getGitWorkspaceSnapshot({bool fetch = false});
 }
 
 class SecurityAuditEntry {

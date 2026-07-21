@@ -4,10 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -20,9 +24,14 @@ class AgentMonitorService : Service() {
         const val ACTION_SYNC = "agent_remote.SYNC_CODEX"
         const val CHANNEL_RUNNING = "agent_remote_running"
         const val CHANNEL_DONE = "agent_remote_done"
+        const val CHANNEL_DONE_CUSTOM = "agent_remote_done_custom"
+        const val DONE_PREFS = "agent_remote_notifications"
+        const val DONE_SOUND_URI = "done_sound_uri"
         const val NOTIFICATION_ID = 9120
         const val SYNC_NOTIFICATION_ID = 9121
         const val SYNC_PREFS = "agent_remote_codex_sync"
+        const val RUNTIME_PREFS = "agent_remote_runtime"
+        const val APP_FOREGROUND = "app_foreground"
     }
 
     private val monitoredSessions = ConcurrentHashMap.newKeySet<String>()
@@ -30,6 +39,12 @@ class AgentMonitorService : Service() {
     @Volatile private var syncThreadRunning = false
     @Volatile private var syncTasksUrl = ""
     @Volatile private var syncToken = ""
+    private val soundLock = Any()
+    private var doneSoundPlayer: MediaPlayer? = null
+
+    private fun appIsForeground(): Boolean =
+        getSharedPreferences(RUNTIME_PREFS, MODE_PRIVATE)
+            .getBoolean(APP_FOREGROUND, false)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -95,6 +110,10 @@ class AgentMonitorService : Service() {
         var idlePolls = 0
         val monitorStartedAt = System.currentTimeMillis()
         while (monitoredSessions.contains(sessionId)) {
+            if (appIsForeground()) {
+                Thread.sleep(3000)
+                continue
+            }
             try {
                 val root = JSONObject(get(tasksUrl, token))
                 val tasks = root.optJSONArray("tasks")
@@ -148,7 +167,7 @@ class AgentMonitorService : Service() {
                         } else {
                             "$title - $detail - $elapsed"
                         }
-                        notify(
+                        notifyCompletion(
                             notificationId(sessionId) + 10000,
                             notification(
                                 if (success) "Task selesai" else "Task $status",
@@ -214,6 +233,10 @@ class AgentMonitorService : Service() {
             ?: mutableSetOf()
         var initialized = preferences.getBoolean("initialized", false)
         while (syncActive) {
+            if (appIsForeground()) {
+                Thread.sleep(5000)
+                continue
+            }
             try {
                 val tasks = JSONObject(get(syncTasksUrl, syncToken)).optJSONArray("tasks")
                 if (tasks != null) {
@@ -232,7 +255,7 @@ class AgentMonitorService : Service() {
                             } else {
                                 "$title - $detail"
                             }
-                            notify(
+                            notifyCompletion(
                                 externalNotificationId(taskId),
                                 notification(
                                     "Codex task selesai",
@@ -267,6 +290,7 @@ class AgentMonitorService : Service() {
         ongoing: Boolean,
         showStopAction: Boolean = ongoing,
     ): android.app.Notification {
+        createChannels()
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (sessionId.isNotEmpty()) putExtra("session_id", sessionId)
@@ -279,7 +303,7 @@ class AgentMonitorService : Service() {
         )
         val builder = android.app.Notification.Builder(
             this,
-            if (ongoing) CHANNEL_RUNNING else CHANNEL_DONE,
+            if (ongoing) CHANNEL_RUNNING else doneChannelId(),
         )
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(title)
@@ -328,9 +352,75 @@ class AgentMonitorService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_RUNNING, "Task berjalan", NotificationManager.IMPORTANCE_LOW),
         )
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_DONE, "Task selesai", NotificationManager.IMPORTANCE_DEFAULT),
-        )
+        val doneChannel = NotificationChannel(doneChannelId(), "Task selesai", NotificationManager.IMPORTANCE_DEFAULT)
+        if (customDoneSoundFile() != null) doneChannel.setSound(null, null)
+        manager.createNotificationChannel(doneChannel)
+    }
+
+    private fun doneChannelId(): String {
+        return if (customDoneSoundFile() == null) CHANNEL_DONE else CHANNEL_DONE_CUSTOM
+    }
+
+    private fun notifyCompletion(id: Int, notification: android.app.Notification) {
+        notify(id, notification)
+        playCustomDoneSound()
+    }
+
+    private fun customDoneSoundFile(): File? {
+        val path = getSharedPreferences(DONE_PREFS, Context.MODE_PRIVATE)
+            .getString(DONE_SOUND_URI, "").orEmpty()
+        if (path.isEmpty()) return null
+        return try {
+            val directory = File(filesDir, "notification-sounds").canonicalFile
+            val file = File(path).canonicalFile
+            file.takeIf { it.isFile && it.parentFile == directory }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun playCustomDoneSound() {
+        val file = customDoneSoundFile() ?: return
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !manager.areNotificationsEnabled()) return
+        synchronized(soundLock) {
+            doneSoundPlayer?.release()
+            val player = MediaPlayer()
+            doneSoundPlayer = player
+            try {
+                player.setAudioAttributes(
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
+                )
+                player.setDataSource(file.absolutePath)
+                player.setOnCompletionListener { completed ->
+                    synchronized(soundLock) {
+                        if (doneSoundPlayer === completed) doneSoundPlayer = null
+                        completed.release()
+                    }
+                }
+                player.setOnErrorListener { failed, _, _ ->
+                    synchronized(soundLock) {
+                        if (doneSoundPlayer === failed) doneSoundPlayer = null
+                        failed.release()
+                    }
+                    true
+                }
+                player.prepare()
+                player.start()
+            } catch (_: Exception) {
+                if (doneSoundPlayer === player) doneSoundPlayer = null
+                player.release()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        synchronized(soundLock) {
+            doneSoundPlayer?.release()
+            doneSoundPlayer = null
+        }
+        syncActive = false
+        super.onDestroy()
     }
 
     private fun notify(id: Int, notification: android.app.Notification) {

@@ -67,4 +67,41 @@ class BackgroundTaskMonitor {
       return null;
     }
   }
+
+  static Future<Map<String, String>?> pickNotificationSound() async {
+    try {
+      final value = await _channel.invokeMapMethod<String, String>(
+        'pickNotificationSound',
+      );
+      return value;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  static Future<Map<String, String>?> getNotificationSound() async {
+    try {
+      return await _channel.invokeMapMethod<String, String>(
+        'getNotificationSound',
+      );
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  static Future<void> clearNotificationSound() async {
+    try {
+      await _channel.invokeMethod<void>('clearNotificationSound');
+    } on MissingPluginException {
+      return;
+    }
+  }
+
+  static Future<void> previewNotificationSound() async {
+    try {
+      await _channel.invokeMethod<void>('previewNotificationSound');
+    } on MissingPluginException {
+      return;
+    }
+  }
 }

@@ -12,9 +12,14 @@ class AppController extends ChangeNotifier {
   StreamSubscription<AgentEvent>? _sub;
   Timer? _taskTimer;
   Timer? _saveTimer;
+  bool _taskPollInFlight = false;
+  bool _appForeground = true;
   AppUiState _restoredUiState = const AppUiState();
   String? currentId;
   ThemeModeChoice theme = ThemeModeChoice.system;
+  final ValueNotifier<ThemeModeChoice> themeMode = ValueNotifier(
+    ThemeModeChoice.system,
+  );
   int page = 0;
   String search = '';
   AgentCapabilities capabilities = const AgentCapabilities();
@@ -80,10 +85,7 @@ class AppController extends ChangeNotifier {
       connectorError = null;
       _taskTimer?.cancel();
       await reloadTasks();
-      _taskTimer = Timer.periodic(
-        const Duration(seconds: 3),
-        (_) => reloadTasks(),
-      );
+      _scheduleTaskPolling();
     } catch (error) {
       await nextEvents.cancel();
       await next.dispose();
@@ -136,6 +138,7 @@ class AppController extends ChangeNotifier {
     );
     await _save();
     notifyListeners();
+    _scheduleTaskPolling(immediate: true);
     try {
       await connector.sendPrompt(
         sessionId: s.id,
@@ -165,6 +168,7 @@ class AppController extends ChangeNotifier {
     }
     if (e.type == AgentEventType.connectorError) {
       connected = false;
+      _taskTimer?.cancel();
       connectorError = e.text;
       notifyListeners();
       return;
@@ -422,6 +426,12 @@ class AppController extends ChangeNotifier {
       _saveTimer = Timer(const Duration(milliseconds: 350), _save);
     }
     notifyListeners();
+    if (e.type == AgentEventType.messageStarted ||
+        e.type == AgentEventType.messageCompleted ||
+        e.type == AgentEventType.messageFailed ||
+        e.type == AgentEventType.generationStopped) {
+      _scheduleTaskPolling(immediate: e.type == AgentEventType.messageStarted);
+    }
   }
 
   Future<void> stop() =>
@@ -458,19 +468,118 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  int listLimit = 200;
+  int listLimit = 50;
 
   Future<void> loadMore() async {
-    listLimit += 200;
+    listLimit += 50;
     await reloadSessions();
   }
 
   Future<void> reloadTasks() async {
-    if (!connected) return;
+    if (!connected || _taskPollInFlight) return;
+    _taskPollInFlight = true;
     try {
-      tasks = await connector.listTasks();
-      notifyListeners();
-    } catch (_) {}
+      final nextTasks = await connector.listTasks();
+      final tasksChanged =
+          _taskFingerprint(tasks) != _taskFingerprint(nextTasks);
+      if (tasksChanged) tasks = nextTasks;
+      final reconciled = _reconcileGeneratingSessions(nextTasks);
+      if (reconciled) await _save();
+      if (tasksChanged || reconciled) notifyListeners();
+    } catch (_) {
+    } finally {
+      _taskPollInFlight = false;
+    }
+  }
+
+  void setAppForeground(bool foreground) {
+    if (_appForeground == foreground) return;
+    _appForeground = foreground;
+    if (!foreground) {
+      _taskTimer?.cancel();
+      return;
+    }
+    _scheduleTaskPolling(immediate: true);
+  }
+
+  void _scheduleTaskPolling({bool immediate = false}) {
+    _taskTimer?.cancel();
+    if (!connected || !_appForeground) return;
+    final active =
+        tasks.any(
+          (task) => task.status == 'running' || task.status == 'queued',
+        ) ||
+        sessions.any((session) => session.status == SessionStatus.generating);
+    final delay = immediate
+        ? Duration.zero
+        : active
+        ? const Duration(seconds: 3)
+        : const Duration(seconds: 12);
+    _taskTimer = Timer(delay, () async {
+      if (!connected || !_appForeground) return;
+      await reloadTasks();
+      _scheduleTaskPolling();
+    });
+  }
+
+  String _taskFingerprint(List<AgentTask> values) => values
+      .map(
+        (task) => [
+          task.id,
+          task.status,
+          task.detail,
+          task.activeAgent,
+          task.elapsedSeconds,
+          task.idleSeconds,
+          task.concurrency,
+          task.changedFiles,
+          ...task.agentStates.expand(
+            (state) => [
+              state.id,
+              state.status,
+              state.phase,
+              state.detail,
+              state.elapsedSeconds,
+              state.idleSeconds,
+            ],
+          ),
+        ].join('\u001f'),
+      )
+      .join('\u001e');
+
+  bool _reconcileGeneratingSessions(List<AgentTask> nextTasks) {
+    var changed = false;
+    final now = DateTime.now();
+    for (final session in [...sessions]) {
+      if (session.status != SessionStatus.generating) continue;
+      final matching = nextTasks
+          .where((task) => task.sessionId == session.id)
+          .toList();
+      final active = matching.any(
+        (task) => task.status == 'running' || task.status == 'queued',
+      );
+      if (active) continue;
+      final terminal = matching
+          .where(
+            (task) =>
+                task.status == 'completed' ||
+                task.status == 'failed' ||
+                task.status == 'stopped',
+          )
+          .firstOrNull;
+      if (terminal == null &&
+          now.difference(session.updatedAt) < const Duration(seconds: 15)) {
+        continue;
+      }
+      final status = switch (terminal?.status) {
+        'failed' => SessionStatus.failed,
+        'stopped' => SessionStatus.stopped,
+        _ => SessionStatus.idle,
+      };
+      _replace(session.copyWith(status: status, updatedAt: now));
+      changed = true;
+    }
+    return changed;
   }
 
   Future<void> reloadSessions() async {
@@ -526,9 +635,26 @@ class AppController extends ChangeNotifier {
 
   Future<void> reloadWorkspaceData({bool fetchGit = false}) async {
     if (connector case final WorkspaceMonitor monitor) {
+      if (connector case final GitWorkspaceMonitor snapshotMonitor) {
+        final results = await Future.wait([
+          snapshotMonitor.getGitWorkspaceSnapshot(fetch: fetchGit),
+          monitor.listWorkspace(workspaceFolder),
+        ]);
+        final snapshot = results[0] as GitWorkspaceSnapshot;
+        gitStatus = snapshot.files;
+        gitRepository = snapshot.repository;
+        workspaceEntries = results[1] as List<WorkspaceEntry>;
+        notifyListeners();
+        return;
+      }
+      final fetchedRepository = fetchGit
+          ? await monitor.getGitRepositoryStatus(fetch: true)
+          : null;
       final results = await Future.wait([
-        monitor.getGitStatus(fetch: fetchGit),
-        monitor.getGitRepositoryStatus(fetch: false),
+        monitor.getGitStatus(fetch: false),
+        fetchedRepository == null
+            ? monitor.getGitRepositoryStatus(fetch: false)
+            : Future.value(fetchedRepository),
         monitor.listWorkspace(workspaceFolder),
       ]);
       gitStatus = results[0] as List<GitStatusEntry>;
@@ -594,6 +720,7 @@ class AppController extends ChangeNotifier {
 
   void setTheme(ThemeModeChoice v) {
     theme = v;
+    themeMode.value = v;
     notifyListeners();
   }
 
@@ -622,6 +749,7 @@ class AppController extends ChangeNotifier {
     _saveTimer?.cancel();
     _sub?.cancel();
     connector.dispose();
+    themeMode.dispose();
     super.dispose();
   }
 }

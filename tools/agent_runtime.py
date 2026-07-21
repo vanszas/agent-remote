@@ -21,6 +21,24 @@ AGENT_DISPLAY_NAMES = {
 }
 TERMINAL_AGENT_STATUSES = {"completed", "failed", "stopped"}
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def hidden_process_kwargs(*, process_group: bool = False) -> dict:
+    if os.name != "nt":
+        return {}
+    flags = CREATE_NO_WINDOW
+    if process_group:
+        flags |= CREATE_NEW_PROCESS_GROUP
+    return {"creationflags": flags}
+
+
+def configured_agent_limit() -> int:
+    try:
+        return max(1, min(8, int(os.environ.get("AGENT_REMOTE_MAX_AGENTS", "4"))))
+    except ValueError:
+        return 2
 
 
 def now_iso() -> str:
@@ -75,7 +93,7 @@ def infer_activity_phase(value: str) -> str:
     return "responding"
 
 
-def available_agents(hermes: Path) -> list[dict]:
+def available_agents(hermes: Path | None) -> list[dict]:
     definitions = [
         ("codex", "Codex", "OpenAI Codex CLI", ("codex.cmd", "codex.exe", "codex"), True, True),
         ("claude", "Claude Code", "Anthropic Claude Code CLI", ("claude.cmd", "claude.exe", "claude"), True, False),
@@ -94,12 +112,13 @@ def available_agents(hermes: Path) -> list[dict]:
             "supports_streaming": streaming,
             "supports_tools": tools,
         })
+    hermes_installed = hermes is not None and hermes.is_file()
     agents.append({
         "id": "hermes",
         "name": "Hermes",
         "description": "Hermes Agent CLI",
-        "command": str(hermes) if hermes.exists() else "",
-        "installed": hermes.exists(),
+        "command": str(hermes) if hermes_installed else "",
+        "installed": hermes_installed,
         "supports_streaming": False,
         "supports_tools": True,
     })
@@ -110,7 +129,11 @@ def normalize_codex_event(line: str, agent_id: str) -> list[dict]:
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
-        return [{"type": "delta", "agent_id": agent_id, "text": f"{line}\n"}]
+        return [{
+            "type": "diagnostic",
+            "agent_id": agent_id,
+            "text": line,
+        }]
     if not isinstance(event, dict):
         text = str(event).strip()
         return [{
@@ -217,6 +240,36 @@ class SessionStore:
             )
             return json.loads(json.dumps(values[:limit]))
 
+    def list_summaries(self, limit: int = 200) -> "list[dict]":
+        keys = (
+            "id",
+            "title",
+            "createdAt",
+            "updatedAt",
+            "isPinned",
+            "isArchived",
+            "workspaceName",
+            "workspacePath",
+            "connectionProfileId",
+            "activeModelName",
+            "status",
+            "preview",
+        )
+        with self.lock:
+            values = sorted(
+                self.sessions.values(),
+                key=lambda item: item.get("updatedAt", ""),
+                reverse=True,
+            )
+            summaries = []
+            for item in values[:limit]:
+                summary = {key: item.get(key) for key in keys}
+                summary["messageCount"] = int(
+                    item.get("messageCount") or len(item.get("messages") or [])
+                )
+                summaries.append(summary)
+            return json.loads(json.dumps(summaries))
+
     def get(self, session_id: str) -> dict:
         with self.lock:
             if session_id not in self.sessions:
@@ -264,6 +317,20 @@ class SessionStore:
             self.sessions[session_id]["updatedAt"] = now_iso()
             self._save()
         return self.get(session_id)
+
+    def recover_interrupted_sessions(self) -> int:
+        recovered = 0
+        timestamp = now_iso()
+        with self.lock:
+            for session in self.sessions.values():
+                if session.get("status") != "generating":
+                    continue
+                session["status"] = "stopped"
+                session["updatedAt"] = timestamp
+                recovered += 1
+            if recovered:
+                self._save()
+        return recovered
 
     def append_message(self, session_id: str, role: str, content: str) -> dict:
         with self.lock:
@@ -338,6 +405,7 @@ class AgentRuntime:
         command_factory,
         workspace: Path,
         environment_factory=None,
+        max_concurrent_agents: int | None = None,
     ):
         self.store = store
         self.command_factory = command_factory
@@ -348,6 +416,9 @@ class AgentRuntime:
         self.session_runs = {}
         self.cancelled = set()
         self.tasks = {}
+        self.max_concurrent_agents = max_concurrent_agents or configured_agent_limit()
+        self.agent_slots = threading.BoundedSemaphore(self.max_concurrent_agents)
+        self.store.recover_interrupted_sessions()
 
     def _register(self, run_id: str, session_id: str, process: subprocess.Popen):
         with self.lock:
@@ -484,6 +555,7 @@ class AgentRuntime:
                     capture_output=True,
                     timeout=10,
                     check=False,
+                    **hidden_process_kwargs(),
                 )
             else:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -505,6 +577,7 @@ class AgentRuntime:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                **hidden_process_kwargs(),
             )
             untracked = subprocess.run(
                 [
@@ -519,6 +592,7 @@ class AgentRuntime:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                **hidden_process_kwargs(),
             )
             if changed.returncode != 0 or untracked.returncode != 0:
                 return {}
@@ -571,8 +645,53 @@ class AgentRuntime:
         initial_phase: str = "preparing",
         initial_detail: str = "Menyiapkan agent",
     ) -> str:
+        self._update_agent_state(
+            run_id,
+            agent_id,
+            status="queued",
+            phase="queued",
+            detail="Menunggu slot agent",
+        )
+        acquired = False
+        while not acquired:
+            if run_id in self.cancelled:
+                return ""
+            acquired = self.agent_slots.acquire(timeout=0.25)
+        try:
+            if run_id in self.cancelled:
+                return ""
+            return self._run_agent_process(
+                run_id,
+                session_id,
+                agent_id,
+                text,
+                model,
+                attachments,
+                permission,
+                events,
+                initial_phase,
+                initial_detail,
+            )
+        finally:
+            self.agent_slots.release()
+
+    def _run_agent_process(
+        self,
+        run_id: str,
+        session_id: str,
+        agent_id: str,
+        text: str,
+        model: str,
+        attachments: list[Path],
+        permission: str,
+        events: queue.Queue,
+        initial_phase: str = "preparing",
+        initial_detail: str = "Menyiapkan agent",
+    ) -> str:
         output = []
+        diagnostics = []
         process = None
+        stderr_thread = None
         try:
             self._update_agent_state(
                 run_id,
@@ -589,18 +708,16 @@ class AgentRuntime:
                 process_environment.update(self.environment_factory(agent_id))
             process_environment['GIT_TERMINAL_PROMPT'] = '0'
             process_environment['GCM_INTERACTIVE'] = 'Never'
-            process_group = (
-                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-                if os.name == "nt"
-                else {"start_new_session": True}
-            )
+            process_group = hidden_process_kwargs(process_group=True) if os.name == "nt" else {
+                "start_new_session": True
+            }
             process = subprocess.Popen(
                 self.command_factory(agent_id, text, model, attachments, permission),
                 cwd=self.workspace,
                 stdin=subprocess.DEVNULL,
                 text=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
@@ -608,6 +725,23 @@ class AgentRuntime:
                 **process_group,
             )
             self._register(run_id, session_id, process)
+            stderr_stream = getattr(process, "stderr", None)
+            if stderr_stream is not None:
+                def collect_stderr():
+                    try:
+                        for raw in stderr_stream:
+                            value = ANSI_ESCAPE.sub("", raw.rstrip())
+                            if value:
+                                diagnostics.append(value)
+                    except (OSError, ValueError):
+                        pass
+
+                stderr_thread = threading.Thread(
+                    target=collect_stderr,
+                    name=f"agent-stderr-{run_id}-{agent_id}",
+                    daemon=True,
+                )
+                stderr_thread.start()
             assert process.stdout is not None
             for raw in process.stdout:
                 if run_id in self.cancelled:
@@ -682,8 +816,26 @@ class AgentRuntime:
                         )
                     elif event["type"] == "agent_failed":
                         raise RuntimeError(str(event.get("error") or "Agent gagal"))
+                    elif event["type"] == "diagnostic":
+                        diagnostic = str(event.get("text") or "").strip()
+                        if diagnostic:
+                            diagnostics.append(diagnostic)
+                        continue
                     events.put(event)
             return_code = process.wait(timeout=10)
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=2)
+            diagnostic_output = "\n".join(diagnostics).strip()
+            if diagnostic_output:
+                self.store.append_activity(
+                    session_id,
+                    run_id,
+                    agent_id,
+                    "diagnostic",
+                    "failed" if return_code != 0 else "completed",
+                    f"{AGENT_DISPLAY_NAMES.get(agent_id, agent_id)} diagnostic",
+                    output=diagnostic_output,
+                )
             if run_id in self.cancelled:
                 self._update_agent_state(
                     run_id,
@@ -695,7 +847,7 @@ class AgentRuntime:
                 events.put({"type": "agent_stopped", "agent_id": agent_id})
                 return "".join(output).strip()
             if return_code != 0:
-                error_output = "".join(output).strip()
+                error_output = diagnostic_output or "".join(output).strip()
                 raise RuntimeError(error_output[-2000:] or f"{agent_id} exited with {return_code}")
             events.put({"type": "agent_completed", "agent_id": agent_id})
             self._update_agent_state(
@@ -738,6 +890,8 @@ class AgentRuntime:
             if process is not None:
                 if run_id in self.cancelled:
                     self._terminate_process_tree(process)
+                if stderr_thread is not None:
+                    stderr_thread.join(timeout=1)
                 self._unregister(run_id, session_id, process)
 
     def execute(
@@ -751,12 +905,17 @@ class AgentRuntime:
         attachments: list[Path],
         permission: str,
         events: queue.Queue,
+        concurrency: int = 2,
     ):
         run_id = new_id("run")
         timestamp = now_iso()
         task_workspace = self.workspace
         baseline_git_state = self._git_changed_state(task_workspace)
         effective_agent_ids = agent_ids[:1] if mode == "single" else agent_ids
+        task_concurrency = 1 if mode == "single" else max(
+            1,
+            min(self.max_concurrent_agents, concurrency, len(effective_agent_ids)),
+        )
         lead = (
             coordinator if coordinator in effective_agent_ids else effective_agent_ids[0]
         ) if effective_agent_ids else ""
@@ -795,6 +954,7 @@ class AgentRuntime:
                 "agentStates": agent_states,
                 "activeAgent": "",
                 "mode": mode,
+                "concurrency": task_concurrency,
                 "source": "agent_remote",
                 "permission": permission,
                 "workspace": str(self.workspace),
@@ -821,7 +981,7 @@ class AgentRuntime:
             if mode == "coordinator" and len(effective_agent_ids) > 1:
                 workers = [agent for agent in effective_agent_ids if agent != lead]
                 with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(workers)
+                    max_workers=min(len(workers), task_concurrency)
                 ) as executor:
                     futures = {
                         agent: executor.submit(
@@ -865,7 +1025,7 @@ class AgentRuntime:
             else:
                 selected = effective_agent_ids
                 with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(selected)
+                    max_workers=min(len(selected), task_concurrency)
                 ) as executor:
                     futures = {
                         agent: executor.submit(

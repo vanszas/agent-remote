@@ -4,6 +4,8 @@ Agent Remote adalah aplikasi Android untuk mengontrol agent CLI yang berjalan di
 
 Status dokumentasi: **18 Juli 2026**. Versi aplikasi: **0.3.0+2**.
 
+**Pengguna baru:** mulai dari [First Setup untuk Pengguna Public](docs/PUBLIC_USER_FIRST_SETUP.md).
+
 ## Fitur utama
 
 - Deteksi otomatis Codex, Claude Code, Gemini CLI, OpenCode, dan Hermes.

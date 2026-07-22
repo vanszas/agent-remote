@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'agent_connector.dart';
 import 'app_controller.dart';
 import 'local_store.dart';
@@ -7186,6 +7187,11 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
           ),
+          FilledButton.tonalIcon(
+            onPressed: () => scanPairingQr(context, c, connections),
+            icon: const Icon(Icons.qr_code_scanner_rounded),
+            label: const Text('Scan QR Pairing'),
+          ),
           if (c.connectorError case final error?)
             Card(
               color: colors.errorContainer,
@@ -7426,7 +7432,16 @@ class ConnectionSettingsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Koneksi Agent Remote')),
+    appBar: AppBar(
+      title: const Text('Koneksi Agent Remote'),
+      actions: [
+        IconButton(
+          onPressed: () => scanPairingQr(context, app, controller),
+          tooltip: 'Hubungkan dengan QR',
+          icon: const Icon(Icons.qr_code_scanner_rounded),
+        ),
+      ],
+    ),
     body: ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
@@ -8026,6 +8041,110 @@ Future<void> connectGateway(
                   }
                 },
           child: const Text('Connect'),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<void> scanPairingQr(
+  BuildContext context,
+  AppController app,
+  ConnectionSettingsController settings,
+) async {
+  final pairing = await Navigator.push<PairingData>(
+    context,
+    MaterialPageRoute(builder: (_) => const _PairingScannerPage()),
+  );
+  if (pairing == null || !context.mounted) return;
+  try {
+    await settings.selectProvider('remote_gateway');
+    final existing = settings.profiles
+        .where(
+          (profile) =>
+              profile.providerId == 'remote_gateway' &&
+              profile.values['endpoint'] == pairing.endpoint,
+        )
+        .firstOrNull;
+    final profileId =
+        existing?.id ??
+        await settings.addProfile(pairing.name, {
+          'transportType': 'tailscaleServe',
+          'endpoint': pairing.endpoint,
+        });
+    if (existing != null) {
+      await settings.updateProfile(profileId, pairing.name, {
+        ...existing.values,
+        'transportType': 'tailscaleServe',
+        'endpoint': pairing.endpoint,
+      });
+    }
+    await settings.setDefaultProfile(profileId);
+    await CredentialStore().save(
+      profileId,
+      GatewayCredentials('admin', pairing.token),
+    );
+    await app.connect(
+      HermesRemoteConnector(Uri.parse(pairing.endpoint), pairing.token),
+    );
+    if (!app.isDemo) await app.loadWorkspaces(null);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(app.connectorError ?? '${pairing.name} tersambung'),
+      ),
+    );
+  } catch (error) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(connectionErrorMessage(error))));
+    }
+  }
+}
+
+class _PairingScannerPage extends StatefulWidget {
+  const _PairingScannerPage();
+
+  @override
+  State<_PairingScannerPage> createState() => _PairingScannerPageState();
+}
+
+class _PairingScannerPageState extends State<_PairingScannerPage> {
+  bool handled = false;
+
+  void _handle(BarcodeCapture capture) {
+    if (handled) return;
+    for (final barcode in capture.barcodes) {
+      final value = barcode.rawValue;
+      final pairing = value == null ? null : PairingData.parse(value);
+      if (pairing == null) continue;
+      handled = true;
+      Navigator.pop(context, pairing);
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Scan QR Agent Remote')),
+    body: Stack(
+      fit: StackFit.expand,
+      children: [
+        MobileScanner(onDetect: _handle),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: SafeArea(
+            child: Card(
+              margin: const EdgeInsets.all(20),
+              child: const Padding(
+                padding: EdgeInsets.all(14),
+                child: Text(
+                  'Arahkan kamera ke QR pada PC. Jangan bagikan QR karena berisi token akses.',
+                ),
+              ),
+            ),
+          ),
         ),
       ],
     ),

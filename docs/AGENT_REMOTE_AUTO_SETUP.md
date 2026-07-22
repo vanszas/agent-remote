@@ -34,12 +34,13 @@ Letakkan file berikut dalam satu folder pada PC Windows:
 
 ```text
 AgentRemote-setup\
+├─ AgentRemoteSetup.exe
 ├─ ServerStart.exe
 ├─ ServerStop.exe
 └─ AgentRemote-latest.apk
 ```
 
-`ServerStart.exe` menjalankan gateway PC. `ServerStop.exe` menghentikan server beserta process agent yang dimulai oleh server. APK dipasang pada HP Android.
+`AgentRemoteSetup.exe` menjadi control center first-run: start/stop server, test koneksi, ganti password, copy connection, dan QR pairing. `ServerStart.exe` menjalankan gateway PC. `ServerStop.exe` menghentikan server beserta process agent yang dimulai oleh server. APK dipasang pada HP Android.
 
 Jangan memindahkan atau mengganti nama `ServerStart.exe` dan `ServerStop.exe` secara terpisah. Keduanya harus berada pada folder yang sama.
 

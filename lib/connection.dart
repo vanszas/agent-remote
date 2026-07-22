@@ -214,6 +214,46 @@ class ConnectionProfile {
   );
 }
 
+class PairingData {
+  const PairingData({
+    required this.endpoint,
+    required this.token,
+    required this.name,
+  });
+  final String endpoint;
+  final String token;
+  final String name;
+
+  static PairingData? parse(String raw) {
+    try {
+      final uri = Uri.parse(raw.trim());
+      if (uri.scheme != 'agentremote' || uri.host != 'pair') return null;
+      final encoded = uri.queryParameters['data'];
+      if (encoded == null || encoded.isEmpty) return null;
+      final padded = encoded.padRight((encoded.length + 3) ~/ 4 * 4, '=');
+      final payload = jsonDecode(utf8.decode(base64Url.decode(padded)));
+      if (payload is! Map) return null;
+      final endpoint = payload['endpoint'] as String? ?? '';
+      final token = payload['token'] as String? ?? '';
+      final name = payload['name'] as String? ?? 'PC Agent Remote';
+      final parsedEndpoint = Uri.tryParse(endpoint);
+      if (parsedEndpoint == null ||
+          !{'http', 'https'}.contains(parsedEndpoint.scheme) ||
+          parsedEndpoint.host.isEmpty ||
+          token.trim().length < 16) {
+        return null;
+      }
+      return PairingData(
+        endpoint: endpoint,
+        token: token,
+        name: name.trim().isEmpty ? 'PC Agent Remote' : name.trim(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class ConnectionSettingsSnapshot {
   const ConnectionSettingsSnapshot({
     this.selectedProviderId,
@@ -343,12 +383,13 @@ class ConnectionSettingsController extends ChangeNotifier {
       profiles.where((p) => p.providerId == id).toList();
   ConnectionProfile? get defaultProfile =>
       profiles.where((p) => p.isDefault && p.isEnabled).firstOrNull;
-  Future<void> addProfile(String name, Map<String, Object?> values) async {
+  Future<String> addProfile(String name, Map<String, Object?> values) async {
     _validate(name, values);
     final now = DateTime.now();
+    final id = 'p${now.microsecondsSinceEpoch}';
     profiles.add(
       ConnectionProfile(
-        id: 'p${now.microsecondsSinceEpoch}',
+        id: id,
         providerId: selectedProviderId ?? '',
         displayName: name.trim(),
         values: values,
@@ -358,6 +399,7 @@ class ConnectionSettingsController extends ChangeNotifier {
     );
     await save();
     notifyListeners();
+    return id;
   }
 
   Future<void> updateProfile(

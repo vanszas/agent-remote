@@ -2,7 +2,7 @@
 
 Agent Remote adalah aplikasi Android untuk mengontrol agent CLI yang berjalan di PC Windows. HP menjadi remote controller; agent, command, akses folder, Git, dan perubahan file tetap berjalan di PC.
 
-Status dokumentasi: **18 Juli 2026**. Versi aplikasi: **0.3.0+2**.
+Status dokumentasi: **22 Juli 2026**. Versi aplikasi: **0.4.1+4**.
 
 **Pengguna baru:** mulai dari [First Setup untuk Pengguna Public](docs/PUBLIC_USER_FIRST_SETUP.md).
 
@@ -18,6 +18,7 @@ Status dokumentasi: **18 Juli 2026**. Versi aplikasi: **0.3.0+2**.
 - Restore folder, tab, dan session terakhir.
 - Upload file, galeri, kamera, dan gambar clipboard Android.
 - Panel task aktif, file workspace, Git status, commit, ahead/behind, dan fetch remote.
+- `AgentRemoteSetup.exe` untuk setup, QR pairing, kontrol server, dan ganti password.
 - Server Windows berupa `ServerStart.exe` dan launcher aman `ServerStop.exe` tanpa jendela console.
 - Tailscale akun terdaftar otomatis aktif saat server dinyalakan dan nonaktif saat server dihentikan.
 
@@ -84,6 +85,7 @@ Alur aktivasi: **siapkan CLI agent di PC -> nyalakan server -> hubungkan PC dan 
 
 Pada PC, siapkan dalam satu folder:
 
+- `AgentRemoteSetup.exe` untuk setup pertama dan QR pairing.
 - `ServerStart.exe` untuk menyalakan server Windows.
 - `ServerStop.exe` untuk menghentikan server dan process anaknya.
 - APK Agent Remote untuk Android.
@@ -120,7 +122,13 @@ Simpan hasil `tailscale ip -4`, misalnya `100.101.102.103`. Jangan memakai IP HP
 
 Jika command `tailscale` tidak ditemukan, buka aplikasi Tailscale Windows dari Start Menu dan lihat alamat IP perangkat PC di sana. Restart PowerShell setelah instalasi bila perlu.
 
-### 3. Buat token dan jalankan server PC
+### 3. Jalankan setup PC dan scan QR
+
+Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC. Aplikasi membuat profile, menyimpan token di Android Keystore, menjadikannya default, lalu langsung mencoba terhubung.
+
+QR berisi token akses. Jangan screenshot atau membagikannya. Tailscale PC dan HP tetap harus login pada akun yang sama.
+
+### 4. Cara manual
 
 Untuk percobaan pertama, jalankan `ServerStart.exe`. Server memakai port `9120`; token pertama dibuat acak dan disimpan lokal pada `%LOCALAPPDATA%\\AgentRemote\\server-token.txt`.
 
@@ -144,7 +152,7 @@ Invoke-RestMethod http://127.0.0.1:9120/api/status -Headers $headers
 
 Jika server membuat token otomatis, baca token lokal dengan `$token = Get-Content "$env:LOCALAPPDATA\\AgentRemote\\server-token.txt"`. Response JSON berarti server aktif.
 
-### 4. Izinkan port pada Windows Firewall
+### 5. Izinkan port pada Windows Firewall
 
 Jalankan PowerShell sebagai Administrator, lalu buat rule khusus alamat Tailscale:
 
@@ -161,7 +169,7 @@ New-NetFirewallRule `
 
 Rule ini hanya menerima sumber dari rentang alamat Tailscale, bukan membuka port `9120` untuk seluruh internet.
 
-### 5. Install APK Android
+### 6. Install APK Android
 
 Cara termudah: buka APK di HP, izinkan **Install unknown apps** untuk aplikasi yang membuka APK, lalu install.
 
@@ -174,7 +182,7 @@ adb install -r .\build\app\outputs\flutter-apk\app-debug.apk
 
 `adb devices` harus menampilkan HP dengan status `device`. USB hanya diperlukan untuk instalasi; pemakaian harian berjalan melalui Tailscale.
 
-### 6. Hubungkan Agent Remote ke PC
+### 7. Hubungkan Agent Remote ke PC
 
 1. Pastikan Tailscale aktif pada PC dan HP.
 2. Pastikan `ServerStart.exe` aktif pada PC.

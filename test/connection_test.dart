@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_remote/connection.dart';
@@ -58,5 +59,24 @@ void main() {
     );
     expect(c.summary, 'No connection profile configured');
     expect(c.providerSummary, '2 providers available');
+  });
+
+  test('pairing QR validates endpoint and token', () {
+    final data = base64Url
+        .encode(
+          utf8.encode(
+            jsonEncode({
+              'v': 1,
+              'endpoint': 'http://100.64.0.1:9120',
+              'token': 'x' * 32,
+              'name': 'PC-Test',
+            }),
+          ),
+        )
+        .replaceAll('=', '');
+    final pairing = PairingData.parse('agentremote://pair?data=$data');
+    expect(pairing?.endpoint, 'http://100.64.0.1:9120');
+    expect(pairing?.name, 'PC-Test');
+    expect(PairingData.parse('agentremote://pair?data=bad'), isNull);
   });
 }

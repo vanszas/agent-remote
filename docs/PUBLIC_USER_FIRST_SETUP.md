@@ -15,6 +15,7 @@ Panduan ini untuk pengguna baru yang menerima paket Agent Remote. Tidak perlu so
 ```text
 ServerStart.exe
 ServerStop.exe
+AgentRemoteSetup.exe
 AgentRemote-latest.apk
 ```
 
@@ -64,7 +65,18 @@ where.exe opencode
 
 Jika hasil kosong, perbaiki `PATH` Windows lalu buka PowerShell baru.
 
-## 3. Jalankan Server PC
+## 3. Jalankan Setup PC
+
+Double-click `AgentRemoteSetup.exe`. File ini harus satu folder dengan `ServerStart.exe` dan `ServerStop.exe`.
+
+1. Tekan **Start Server**.
+2. Tunggu status menjadi **Server aktif**.
+3. Biarkan QR tetap terbuka.
+4. Jangan screenshot atau membagikan QR; QR berisi token akses PC.
+
+Menu **Change Password** menghentikan server, mengganti token, lalu menyalakan server kembali. Perubahan ditolak saat task masih aktif. Setelah password berubah, scan QR ulang pada HP.
+
+### Cara manual
 
 Buka folder paket, lalu double-click `ServerStart.exe`.
 
@@ -106,6 +118,16 @@ Nilai `TcpTestSucceeded` harus `True`.
 USB hanya diperlukan untuk instalasi melalui ADB. Pemakaian harian tidak memerlukan USB.
 
 ## 5. Hubungkan HP ke PC
+
+### QR pairing
+
+1. Buka **Pengaturan**.
+2. Tekan **Scan QR Pairing**.
+3. Izinkan kamera.
+4. Scan QR pada `AgentRemoteSetup.exe`.
+5. Profile, endpoint, dan token tersimpan otomatis; aplikasi langsung mencoba terhubung.
+
+### Cara manual
 
 Di Agent Remote:
 

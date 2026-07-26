@@ -74,6 +74,8 @@ Double-click `AgentRemoteSetup.exe`. File ini harus satu folder dengan `ServerSt
 3. Biarkan QR tetap terbuka.
 4. Jangan screenshot atau membagikan QR; QR berisi token akses PC.
 
+Tekan **Tambahkan Shortcut Start Menu + Desktop** untuk memasang control center pada lokasi stabil `%LOCALAPPDATA%\AgentRemote\bin`. Shortcut user dibuat pada Desktop dan Start Menu tanpa izin Administrator.
+
 Menu **Change Password** menghentikan server, mengganti token, lalu menyalakan server kembali. Perubahan ditolak saat task masih aktif. Setelah password berubah, scan QR ulang pada HP.
 
 ### Cara manual

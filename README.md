@@ -2,9 +2,9 @@
 
 Agent Remote adalah aplikasi Android untuk mengontrol agent CLI yang berjalan di PC Windows. HP menjadi remote controller; agent, command, akses folder, Git, dan perubahan file tetap berjalan di PC.
 
-Status dokumentasi: **22 Juli 2026**. Versi aplikasi: **0.4.1+4**.
+Status dokumentasi: **26 Juli 2026**. Versi aplikasi: **0.4.2+5**.
 
-**Pengguna baru:** mulai dari [First Setup untuk Pengguna Public](docs/PUBLIC_USER_FIRST_SETUP.md).
+**Pengguna baru:** mulai dari [First Setup untuk Pengguna Public](docs/PUBLIC_USER_FIRST_SETUP.md). **AI setup agent:** gunakan [Runbook First-run](docs/AI_FIRST_SETUP.md).
 
 ## Fitur utama
 
@@ -18,7 +18,7 @@ Status dokumentasi: **22 Juli 2026**. Versi aplikasi: **0.4.1+4**.
 - Restore folder, tab, dan session terakhir.
 - Upload file, galeri, kamera, dan gambar clipboard Android.
 - Panel task aktif, file workspace, Git status, commit, ahead/behind, dan fetch remote.
-- `AgentRemoteSetup.exe` untuk setup, QR pairing, kontrol server, dan ganti password.
+- `AgentRemoteSetup.exe` untuk setup, QR pairing, kontrol server, ganti password, dan shortcut Start Menu/Desktop.
 - Server Windows berupa `ServerStart.exe` dan launcher aman `ServerStop.exe` tanpa jendela console.
 - Tailscale akun terdaftar otomatis aktif saat server dinyalakan dan nonaktif saat server dihentikan.
 
@@ -124,7 +124,7 @@ Jika command `tailscale` tidak ditemukan, buka aplikasi Tailscale Windows dari S
 
 ### 3. Jalankan setup PC dan scan QR
 
-Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC. Aplikasi membuat profile, menyimpan token di Android Keystore, menjadikannya default, lalu langsung mencoba terhubung.
+Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Tambahkan Shortcut Start Menu + Desktop** agar paket disalin ke `%LOCALAPPDATA%\AgentRemote\bin` dan shortcut tidak rusak saat folder download dipindah. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC.
 
 QR berisi token akses. Jangan screenshot atau membagikannya. Tailscale PC dan HP tetap harus login pada akun yang sama.
 

@@ -4,10 +4,27 @@
 >
 > Setup selalu dimulai dari membuat atau login akun Tailscale. Jangan menyalakan server sebelum PC dan HP berada pada tailnet yang sama.
 
-**Tanggal dokumen:** 21 Juli 2026
-**Paket:** Agent Remote `0.3.0+2`
+**Tanggal dokumen:** 26 Juli 2026
+**Paket:** Agent Remote `0.4.2+5`
 **Target:** Windows 10/11 + Android 7+
-**Status paket saat ini:** Release Candidate untuk pemakaian terbatas; baca [catatan release gate](#catatan-release-gate) sebelum distribusi publik.
+**Jalur default:** Tailscale + `AgentRemoteSetup.exe` + QR pairing.
+
+---
+
+## Jalur Cepat untuk AI Setup Agent
+
+Jalankan satu tahap, validasi, lalu lanjut. Jangan meminta token server pada jalur QR.
+
+1. Minta pengguna login Tailscale pada PC dan HP memakai akun/tailnet sama.
+2. Pastikan kedua perangkat online. Jika belum, berhenti dan minta pengguna menyelesaikan login Tailscale sendiri.
+3. Pastikan `codex --version`, `claude --version`, `gemini --version`, atau `opencode --version` berhasil minimal satu command pada PC.
+4. Minta pengguna membuka `AgentRemoteSetup.exe` dari folder paket, lalu tekan **Tambahkan Shortcut Start Menu + Desktop** dan **Start Server**.
+5. Minta pengguna install `AgentRemote-latest.apk`, buka **Pengaturan**, lalu tekan **Scan QR Pairing** dan scan QR pada PC.
+6. Pastikan aplikasi menampilkan PC terhubung. Minta pengguna memilih folder kerja, lalu buat **Session baru**. Folder tanpa session juga harus menampilkan tombol **Session baru**.
+7. Kirim smoke check tanpa perubahan file: `Tampilkan nama workspace dan agent yang tersedia. Jangan mengubah file.`
+8. Handoff hanya jika PC aktif, agent terdeteksi, session berhasil dibuat, dan task masuk panel Proses.
+
+Jika QR tidak dapat dipakai, gunakan [koneksi manual](#8-hubungkan-agent-remote-ke-pc) sebagai recovery. Jangan membuka port `9120` ke internet publik.
 
 ---
 
@@ -40,7 +57,7 @@ AgentRemote-setup\
 └─ AgentRemote-latest.apk
 ```
 
-`AgentRemoteSetup.exe` menjadi control center first-run: start/stop server, test koneksi, ganti password, copy connection, dan QR pairing. `ServerStart.exe` menjalankan gateway PC. `ServerStop.exe` menghentikan server beserta process agent yang dimulai oleh server. APK dipasang pada HP Android.
+`AgentRemoteSetup.exe` menjadi control center first-run: start/stop server, test koneksi, ganti password, copy connection, QR pairing, dan shortcut Start Menu/Desktop. Tombol shortcut menyalin tiga EXE ke `%LOCALAPPDATA%\AgentRemote\bin` agar target tetap stabil. `ServerStart.exe` menjalankan gateway PC. `ServerStop.exe` menghentikan server beserta process agent yang dimulai oleh server. APK dipasang pada HP Android.
 
 Jangan memindahkan atau mengganti nama `ServerStart.exe` dan `ServerStop.exe` secara terpisah. Keduanya harus berada pada folder yang sama.
 

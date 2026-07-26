@@ -1780,7 +1780,21 @@ class ProjectSessionGroup extends StatelessWidget {
           if (expanded && !active) c.selectWorkspace(project.workspace.path);
         },
         children: sessions.isEmpty
-            ? const [ListTile(dense: true, title: Text('Belum ada session'))]
+            ? [
+                ListTile(
+                  dense: true,
+                  title: const Text('Belum ada session'),
+                  trailing: FilledButton.tonal(
+                    onPressed: () async {
+                      if (c.workspacePath != project.workspace.path) {
+                        await c.selectWorkspace(project.workspace.path);
+                      }
+                      await c.newSession();
+                    },
+                    child: const Text('Session baru'),
+                  ),
+                ),
+              ]
             : sessions
                   .map((session) => ProjectSessionTile(c, project, session))
                   .toList(),

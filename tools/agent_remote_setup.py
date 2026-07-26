@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,7 +21,9 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PORT = 9120
 STATE_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AgentRemote"
 TOKEN_FILE = STATE_ROOT / "server-token.txt"
+INSTALL_ROOT = STATE_ROOT / "bin"
 ACTIVE_STATUSES = {"queued", "running", "generating"}
+PACKAGE_FILES = ("AgentRemoteSetup.exe", "ServerStart.exe", "ServerStop.exe")
 
 
 def launcher_dir() -> Path:
@@ -66,6 +69,71 @@ def run_hidden(command: list[str], *, wait: bool = False):
     return subprocess.Popen(
         command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options
     )
+
+
+def install_binaries() -> Path:
+    source_root = launcher_dir()
+    missing = [name for name in PACKAGE_FILES if not (source_root / name).is_file()]
+    if missing:
+        raise RuntimeError(
+            "File paket tidak lengkap: " + ", ".join(missing)
+        )
+    INSTALL_ROOT.mkdir(parents=True, exist_ok=True)
+    for name in PACKAGE_FILES:
+        source = (source_root / name).resolve()
+        target = (INSTALL_ROOT / name).resolve()
+        if source == target:
+            continue
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    return INSTALL_ROOT / "AgentRemoteSetup.exe"
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def shortcut_script(target: Path) -> str:
+    quoted_target = _powershell_quote(str(target))
+    quoted_working = _powershell_quote(str(target.parent))
+    return f"""
+$shell = New-Object -ComObject WScript.Shell
+$target = {quoted_target}
+$working = {quoted_working}
+$folders = @(
+  [Environment]::GetFolderPath('Desktop'),
+  [Environment]::GetFolderPath('Programs')
+)
+foreach ($folder in $folders) {{
+  $path = Join-Path $folder 'Agent Remote.lnk'
+  $shortcut = $shell.CreateShortcut($path)
+  $shortcut.TargetPath = $target
+  $shortcut.WorkingDirectory = $working
+  $shortcut.IconLocation = "$target,0"
+  $shortcut.Save()
+}}
+"""
+
+
+def install_shortcuts() -> None:
+    target = install_binaries()
+    encoded = base64.b64encode(
+        shortcut_script(target).encode("utf-16le")
+    ).decode("ascii")
+    result = run_hidden(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded,
+        ],
+        wait=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Shortcut gagal dibuat").strip()
+        raise RuntimeError(detail[:500])
 
 
 def tailscale_ip() -> str | None:
@@ -207,6 +275,12 @@ class SetupApp:
         ).pack(side="right")
 
         ttk.Button(
+            frame,
+            text="Tambahkan Shortcut Start Menu + Desktop",
+            command=self.add_shortcuts,
+        ).pack(fill="x", pady=(14, 0))
+
+        ttk.Button(
             frame, text="Buka Tailscale", command=self.open_tailscale
         ).pack(fill="x", pady=(14, 0))
         ttk.Label(
@@ -314,6 +388,15 @@ class SetupApp:
             "Agent Remote", "Data koneksi disalin. Jangan bagikan password."
         )
 
+    def add_shortcuts(self) -> None:
+        self._background(
+            install_shortcuts,
+            lambda _: messagebox.showinfo(
+                "Agent Remote",
+                "Shortcut Agent Remote dibuat pada Desktop dan Start Menu.",
+            ),
+        )
+
     def change_password(self) -> None:
         try:
             tasks = active_tasks(self.token)
@@ -384,11 +467,17 @@ def self_check() -> None:
         "token": token,
         "name": "PC-Test",
     }
+    assert "CreateShortcut" in shortcut_script(
+        Path("C:/AgentRemote/AgentRemoteSetup.exe")
+    )
 
 
 def main() -> int:
     if "--self-check" in sys.argv:
         self_check()
+        return 0
+    if "--install-shortcuts" in sys.argv:
+        install_shortcuts()
         return 0
     root = tk.Tk()
     SetupApp(root)

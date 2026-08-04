@@ -18,6 +18,8 @@ from tkinter import messagebox, simpledialog, ttk
 from tailscale_control import find_tailscale
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+SETUP_VERSION = "0.4.4"
+SHORTCUT_BUTTON_TEXT = "Tambahkan ke Desktop + Start Menu"
 PORT = 9120
 STATE_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AgentRemote"
 TOKEN_FILE = STATE_ROOT / "server-token.txt"
@@ -212,7 +214,7 @@ def active_tasks(token: str) -> list[dict]:
 class SetupApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Agent Remote Setup")
+        self.root.title(f"Agent Remote Setup {SETUP_VERSION}")
         self.root.geometry("560x720")
         self.root.minsize(520, 650)
         self.token = read_or_create_token()
@@ -227,7 +229,9 @@ class SetupApp:
         frame = ttk.Frame(self.root, padding=22)
         frame.pack(fill="both", expand=True)
         ttk.Label(
-            frame, text="Agent Remote", font=("Segoe UI", 22, "bold")
+            frame,
+            text=f"Agent Remote Setup {SETUP_VERSION}",
+            font=("Segoe UI", 22, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             frame, text="Setup PC, kontrol server, dan QR pairing HP."
@@ -251,6 +255,12 @@ class SetupApp:
             side="left", expand=True, fill="x", padx=(5, 0)
         )
 
+        ttk.Button(
+            frame,
+            text=SHORTCUT_BUTTON_TEXT,
+            command=self.add_shortcuts,
+        ).pack(fill="x", pady=(0, 14))
+
         pairing = ttk.LabelFrame(frame, text="QR Pairing", padding=14)
         pairing.pack(fill="both", expand=True)
         self.qr_label = ttk.Label(pairing, anchor="center")
@@ -273,12 +283,6 @@ class SetupApp:
         ttk.Button(
             security, text="Change Password", command=self.change_password
         ).pack(side="right")
-
-        ttk.Button(
-            frame,
-            text="Tambahkan Shortcut Start Menu + Desktop",
-            command=self.add_shortcuts,
-        ).pack(fill="x", pady=(14, 0))
 
         ttk.Button(
             frame, text="Buka Tailscale", command=self.open_tailscale
@@ -470,6 +474,7 @@ def self_check() -> None:
     assert "CreateShortcut" in shortcut_script(
         Path("C:/AgentRemote/AgentRemoteSetup.exe")
     )
+    assert SETUP_VERSION and "Desktop" in SHORTCUT_BUTTON_TEXT
 
 
 def main() -> int:

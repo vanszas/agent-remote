@@ -50,7 +50,7 @@ Minimal satu harus berhasil. Jika tidak, perbaiki instalasi atau `PATH` agent se
 ### 3. Jalankan setup PC
 
 1. Pengguna membuka `AgentRemoteSetup.exe`.
-2. Tekan **Tambahkan Shortcut Start Menu + Desktop**.
+2. Tekan **Tambahkan ke Desktop + Start Menu**.
 3. Tekan **Start Server**.
 4. Tunggu status **Server aktif**.
 5. Jangan screenshot QR pairing.

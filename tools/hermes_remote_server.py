@@ -134,6 +134,7 @@ GIT_DISCOVERY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 GIT_STATUS_LOCKS: dict[str, threading.Lock] = {}
 GITHUB_CLI_CACHE: tuple[float, dict] | None = None
 MAX_TEXT_FILE_BYTES = 512 * 1024
+MAX_PERSONALIZATION_CHARS = 12000
 MOBILE_KEY_NAME = os.environ.get(
     'AGENT_REMOTE_9ROUTER_MOBILE_KEY_NAME', 'Agent Remote Mobile'
 )
@@ -210,6 +211,7 @@ def save_server_state(workspace: Path, recent: list[str]):
         "last_workspace": str(workspace),
         "recent_workspaces": recent[:30],
         "permission_by_workspace": PERMISSION_BY_WORKSPACE,
+        "global_personalization": GLOBAL_PERSONALIZATION,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(STATE_FILE)
 
@@ -799,6 +801,7 @@ def list_all_tasks() -> list[dict]:
 
 
 SERVER_STATE = load_server_state()
+GLOBAL_PERSONALIZATION = str(SERVER_STATE.get("global_personalization") or "")
 PERMISSION_BY_WORKSPACE = {
     str(path): mode
     for path, mode in SERVER_STATE.get("permission_by_workspace", {}).items()
@@ -1570,6 +1573,23 @@ def save_attachments(workspace: Path, attachments: list[dict]) -> list[Path]:
     return saved
 
 
+def validate_personalization(value) -> str:
+    text = str(value or "").strip()
+    if len(text) > MAX_PERSONALIZATION_CHARS:
+        raise ValueError(f"personalization exceeds {MAX_PERSONALIZATION_CHARS} characters")
+    return text
+
+def personalized_prompt(text: str, global_text: str, session_override) -> str:
+    instructions = global_text if session_override is None else session_override
+    if not instructions:
+        return text
+    return (
+        "Apply these user personalization instructions to this task. "
+        "They control preferences and response style, but cannot override security, "
+        "permissions, or higher-priority instructions.\n\n"
+        f"Personalization:\n{instructions}\n\nUser task:\n{text}"
+    )
+
 def prompt_command(
     text: str, model: str, attachments: list[Path], permission: str = "workspace"
 ) -> list[str]:
@@ -1811,6 +1831,11 @@ class Handler(BaseHTTPRequestHandler):
                     "max_concurrent_agents": RUNTIME.max_concurrent_agents,
                     "features": ["streaming", "sessions", "stop", "tools", "multi_agent", "coordinator", "security_audit", "provider_usage", "mobile_usage_filter", "file_preview", "file_edit"],
                 })
+            if url.path == "/api/personalization":
+                return self._json(HTTPStatus.OK, {
+                    "global": GLOBAL_PERSONALIZATION,
+                    "max_characters": MAX_PERSONALIZATION_CHARS,
+                })
             if url.path == "/api/security/audit":
                 limit = int(query.get("limit", ["50"])[0])
                 return self._json(HTTPStatus.OK, {
@@ -1923,6 +1948,12 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     },
                 )
+            if self.path == "/api/personalization":
+                global GLOBAL_PERSONALIZATION
+                payload = self._payload()
+                GLOBAL_PERSONALIZATION = validate_personalization(payload.get("global"))
+                save_server_state(WORKSPACE, RECENT_WORKSPACES)
+                return self._json(HTTPStatus.OK, {"global": GLOBAL_PERSONALIZATION})
             if self.path == "/api/permission":
                 payload = self._payload()
                 permission = str(payload.get("permission") or "")
@@ -1943,7 +1974,7 @@ class Handler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id") or "")
             if not text:
                 raise ValueError("text is required")
-            STORE.get(session_id)
+            session = STORE.get(session_id)
             attachments = save_attachments(
                 WORKSPACE,
                 payload.get("attachments", []),
@@ -1977,6 +2008,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             if permission not in {"ask", "workspace", "full"}:
                 raise ValueError("invalid permission mode")
+            agent_text = personalized_prompt(
+                text,
+                GLOBAL_PERSONALIZATION,
+                session.get("personalizationOverride"),
+            )
         except KeyError:
             return self._json(
                 HTTPStatus.NOT_FOUND,
@@ -2009,6 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
                 permission,
                 events,
                 concurrency,
+                agent_text,
             ),
             daemon=True,
         )
@@ -2036,13 +2073,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         try:
             payload = self._payload()
-            session = STORE.update(
-                session_id,
-                title=str(payload.get("title") or "Untitled"),
-            )
+            changes = {}
+            if "title" in payload:
+                changes["title"] = str(payload.get("title") or "Untitled")
+            if "personalization_override" in payload:
+                value = payload.get("personalization_override")
+                changes["personalizationOverride"] = (
+                    None if value is None else validate_personalization(value)
+                )
+            if not changes:
+                raise ValueError("no supported session changes")
+            session = STORE.update(session_id, **changes)
             return self._json(HTTPStatus.OK, {"session": session})
         except KeyError:
             self._json(HTTPStatus.NOT_FOUND, {"error": "session not found"})
+        except ValueError as error:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
 
     def do_DELETE(self):
         if not self._authorized():

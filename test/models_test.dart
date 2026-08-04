@@ -21,6 +21,22 @@ void main() {
     expect(AgentSession.fromJson(session.toJson()).id, 's1');
   });
 
+  test('session personalization override survives serialization', () {
+    final session = AgentSession.fromJson({
+      'id': 's1',
+      'title': 'Demo',
+      'createdAt': '2026-01-01T00:00:00Z',
+      'updatedAt': '2026-01-01T00:00:00Z',
+      'personalizationOverride': 'Answer in English',
+    });
+
+    expect(session.personalizationOverride, 'Answer in English');
+    expect(
+      AgentSession.fromJson(session.toJson()).personalizationOverride,
+      'Answer in English',
+    );
+  });
+
   test('attachment filename sanitization and size validation', () {
     expect(sanitizeFilename('../a:b?.txt'), 'a_b_.txt');
     expect(validateAttachmentSize(15 * 1024 * 1024), isNull);

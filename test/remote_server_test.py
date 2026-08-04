@@ -1183,3 +1183,31 @@ def test_security_audit_endpoint_reports_success_and_failure(monkeypatch, tmp_pa
         server.shutdown()
         server.server_close()
         worker.join(timeout=2)
+
+def test_personalization_override_replaces_global():
+    global_prompt = remote_server.personalized_prompt(
+        "Fix bug", "Jawab Indonesia", None
+    )
+    override_prompt = remote_server.personalized_prompt(
+        "Fix bug", "Jawab Indonesia", "Answer in English"
+    )
+
+    assert "Jawab Indonesia" in global_prompt
+    assert "Answer in English" in override_prompt
+    assert "Jawab Indonesia" not in override_prompt
+    assert remote_server.personalized_prompt("Fix bug", "", None) == "Fix bug"
+
+
+def test_session_store_persists_personalization_override(tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "demo")
+    session = store.create()
+
+    updated = store.update(
+        session["id"], personalizationOverride="Keep answers short"
+    )
+
+    assert updated["personalizationOverride"] == "Keep answers short"
+    restored = remote_server.SessionStore(
+        tmp_path / "sessions.json", "demo"
+    ).get(session["id"])
+    assert restored["personalizationOverride"] == "Keep answers short"

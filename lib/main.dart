@@ -90,34 +90,35 @@ class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
     }
     connections = settings;
 
+    _setStage('Siap', 'Agent Remote siap digunakan', 1);
+    if (mounted) setState(() => ready = true);
     final profile = settings.defaultProfile;
     final endpoint = profile?.values['endpoint'] as String?;
     if (profile != null && endpoint != null && endpoint.isNotEmpty) {
-      try {
-        _setStage('Menghubungkan PC', endpoint, .52);
-        final credentials = await CredentialStore().load(profile.id);
-        await controller.connect(
-          HermesRemoteConnector(
-            Uri.parse(endpoint),
-            credentials?.password ?? '',
-          ),
-        );
-        if (!controller.isDemo) {
-          _setStage('Memuat workspace', 'Mengembalikan folder terakhir', .70);
-          await controller.loadWorkspaces(
-            profile.values['workspacePath'] as String?,
-          );
-          _setStage('Sinkron task', 'Memuat session dan proses aktif', .88);
-          await controller.restoreLastSession(
-            await BackgroundTaskMonitor.consumeOpenSession(),
-          );
-        }
-      } catch (error) {
-        controller.connectorError = connectionErrorMessage(error);
-      }
+      unawaited(_connectDefaultProfile(profile, endpoint));
     }
-    _setStage('Siap', 'Agent Remote siap digunakan', 1);
-    if (mounted) setState(() => ready = true);
+  }
+
+  Future<void> _connectDefaultProfile(
+    ConnectionProfile profile,
+    String endpoint,
+  ) async {
+    try {
+      final credentials = await CredentialStore().load(profile.id);
+      await controller.connect(
+        HermesRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
+      );
+      if (controller.isDemo) return;
+      await controller.loadWorkspaces(
+        profile.values['workspacePath'] as String?,
+      );
+      await controller.restoreLastSession(
+        await BackgroundTaskMonitor.consumeOpenSession(),
+      );
+    } catch (error) {
+      controller.connectorError = connectionErrorMessage(error);
+      controller.refresh();
+    }
   }
 
   @override
@@ -2404,6 +2405,18 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
+          if (c.supportsPersonalization)
+            IconButton(
+              tooltip: s.personalizationOverride == null
+                  ? 'Personalization session: global'
+                  : 'Personalization session: custom',
+              onPressed: () => showSessionPersonalization(context, c, s),
+              icon: Icon(
+                s.personalizationOverride == null
+                    ? Icons.tune_outlined
+                    : Icons.tune_rounded,
+              ),
+            ),
           IconButton(
             tooltip: 'Pilih session',
             onPressed: _showSessionSwitcher,
@@ -7110,6 +7123,143 @@ class _NotificationSoundCardState extends State<_NotificationSoundCard> {
   );
 }
 
+Future<void> showGlobalPersonalization(
+  BuildContext context,
+  AppController controller,
+) async {
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    final current = await controller.getGlobalPersonalization();
+    if (!context.mounted) return;
+    final text = TextEditingController(text: current);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Custom global'),
+        content: SizedBox(
+          width: 560,
+          child: TextField(
+            controller: text,
+            autofocus: true,
+            minLines: 8,
+            maxLines: 14,
+            maxLength: 12000,
+            decoration: const InputDecoration(
+              hintText: 'Contoh: Gunakan bahasa Indonesia. Jawab singkat.',
+              helperText: 'Berlaku untuk semua session tanpa override.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, text.text.trim()),
+            child: const Text('Simpan'),
+          ),
+        ],
+      ),
+    );
+    text.dispose();
+    if (result == null) return;
+    await controller.setGlobalPersonalization(result);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Personalization global tersimpan.')),
+    );
+  } catch (error) {
+    messenger.showSnackBar(
+      SnackBar(content: Text('Gagal menyimpan personalization: $error')),
+    );
+  }
+}
+
+Future<void> showSessionPersonalization(
+  BuildContext context,
+  AppController controller,
+  AgentSession session,
+) async {
+  final text = TextEditingController(
+    text: session.personalizationOverride ?? '',
+  );
+  var useGlobal = session.personalizationOverride == null;
+  final result = await showDialog<({bool useGlobal, String text})>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('Personalization session'),
+        content: SizedBox(
+          width: 560,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Gunakan custom global'),
+                subtitle: const Text(
+                  'Matikan untuk mengganti aturan khusus session ini.',
+                ),
+                value: useGlobal,
+                onChanged: (value) => setState(() => useGlobal = value),
+              ),
+              TextField(
+                controller: text,
+                enabled: !useGlobal,
+                minLines: 7,
+                maxLines: 12,
+                maxLength: 12000,
+                decoration: const InputDecoration(
+                  hintText: 'Aturan khusus session ini',
+                  helperText:
+                      'Kosong = nonaktifkan personalization pada session ini.',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, (
+              useGlobal: useGlobal,
+              text: text.text.trim(),
+            )),
+            child: const Text('Simpan'),
+          ),
+        ],
+      ),
+    ),
+  );
+  text.dispose();
+  if (result == null) return;
+  try {
+    await controller.setCurrentSessionPersonalization(
+      result.useGlobal ? null : result.text,
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.useGlobal
+              ? 'Session kembali memakai custom global.'
+              : 'Override session tersimpan.',
+        ),
+      ),
+    );
+  } catch (error) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Gagal menyimpan override: $error')));
+  }
+}
+
 class SettingsPage extends StatelessWidget {
   const SettingsPage(this.c, this.connections, {super.key});
   final AppController c;
@@ -7162,6 +7312,25 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
           ),
+          if (c.supportsPersonalization) ...[
+            const SizedBox(height: 12),
+            const _SettingsSectionTitle(
+              icon: Icons.tune_rounded,
+              title: 'Personalization',
+            ),
+            Card(
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(14),
+                leading: const Icon(Icons.public_rounded),
+                title: const Text('Custom global'),
+                subtitle: const Text(
+                  'Dipakai semua session kecuali session punya override.',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => showGlobalPersonalization(context, c),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           const _SettingsSectionTitle(
             icon: Icons.hub_outlined,
@@ -7244,7 +7413,7 @@ class SettingsPage extends StatelessWidget {
           const Card(
             child: ListTile(
               leading: Icon(Icons.smart_toy_outlined),
-              title: Text('Agent Remote 0.3.0'),
+              title: Text('Agent Remote 0.4.4'),
               subtitle: Text('Remote controller untuk multi-agent di PC'),
             ),
           ),

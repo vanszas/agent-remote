@@ -263,6 +263,7 @@ class HermesRemoteConnector
         WorkspaceMonitor,
         GitWorkspaceMonitor,
         WorkspaceCatalog,
+        PersonalizationConnector,
         SecurityMonitor,
         ProviderUsageMonitor,
         WorkspaceFileEditor {
@@ -760,6 +761,32 @@ class HermesRemoteConnector
   Future<SecurityAuditSnapshot> getSecurityAudit({int limit = 50}) async {
     final data = await _get('/api/security/audit', {'limit': '$limit'});
     return decodeSecurityAudit(data);
+  }
+
+  @override
+  Future<String> getGlobalPersonalization() async {
+    final data = await _get('/api/personalization');
+    return data['global'] as String? ?? '';
+  }
+
+  @override
+  Future<void> setGlobalPersonalization(String value) async {
+    await _request('POST', '/api/personalization', {'global': value});
+  }
+
+  @override
+  Future<AgentSession> setSessionPersonalization(
+    String sessionId,
+    String? value,
+  ) async {
+    final data = await _request('PATCH', '/api/sessions/$sessionId', {
+      'personalization_override': value,
+    });
+    final session = AgentSession.fromJson(
+      Map<String, Object?>.from(data['session'] as Map),
+    );
+    _sessions[sessionId] = session;
+    return session;
   }
 
   @override

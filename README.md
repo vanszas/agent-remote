@@ -12,6 +12,7 @@ Status dokumentasi: **26 Juli 2026**. Versi aplikasi: **0.4.2+5**.
 - Mode **Single**, **Parallel**, dan **Koordinator**.
 - Pemilihan drive atau folder kerja tanpa hardcode.
 - Session tersimpan per folder.
+- Personalization custom global dengan override khusus per session.
 - Persistent timeline untuk antrean, analisis, command, editing, testing, selesai, gagal, dan dihentikan.
 - Foreground notification Android dengan action **Buka** dan **Stop**.
 - Notifikasi task selesai dari Codex Desktop atau Codex CLI di PC.
@@ -124,7 +125,7 @@ Jika command `tailscale` tidak ditemukan, buka aplikasi Tailscale Windows dari S
 
 ### 3. Jalankan setup PC dan scan QR
 
-Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Tambahkan Shortcut Start Menu + Desktop** agar paket disalin ke `%LOCALAPPDATA%\AgentRemote\bin` dan shortcut tidak rusak saat folder download dipindah. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC.
+Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Tambahkan ke Desktop + Start Menu** agar paket disalin ke `%LOCALAPPDATA%\AgentRemote\bin` dan shortcut tidak rusak saat folder download dipindah. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC.
 
 QR berisi token akses. Jangan screenshot atau membagikannya. Tailscale PC dan HP tetap harus login pada akun yang sama.
 
@@ -630,6 +631,13 @@ Ini normal. `ServerStart.exe` dibuat windowless. Verifikasi melalui endpoint sta
 ```powershell
 Get-Process ServerStart -ErrorAction SilentlyContinue
 ```
+
+## Personalization
+
+- **Pengaturan > Personalization > Custom global** mengatur preferensi default semua session.
+- Tombol tune pada halaman chat mengaktifkan override khusus session. Override mengganti global; pilihan **Gunakan custom global** menghapus override.
+- Override kosong menonaktifkan personalization hanya pada session tersebut.
+- Personalization tidak dapat mengganti batas keamanan, permission, atau instruksi prioritas lebih tinggi.
 
 ## Keamanan dan batasan
 

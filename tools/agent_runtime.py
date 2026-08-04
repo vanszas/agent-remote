@@ -300,6 +300,7 @@ class SessionStore:
             "preview": "",
             "messageCount": 0,
             "activities": [],
+            "personalizationOverride": None,
         }
         with self.lock:
             self.sessions[session["id"]] = session
@@ -310,7 +311,13 @@ class SessionStore:
         with self.lock:
             if session_id not in self.sessions:
                 raise KeyError(session_id)
-            allowed = {"title", "status", "activeModelName", "preview"}
+            allowed = {
+                "title",
+                "status",
+                "activeModelName",
+                "preview",
+                "personalizationOverride",
+            }
             self.sessions[session_id].update({
                 key: value for key, value in changes.items() if key in allowed
             })
@@ -906,6 +913,7 @@ class AgentRuntime:
         permission: str,
         events: queue.Queue,
         concurrency: int = 2,
+        agent_text: str | None = None,
     ):
         run_id = new_id("run")
         timestamp = now_iso()
@@ -976,6 +984,7 @@ class AgentRuntime:
             "completed",
             "Task diterima dan masuk antrean",
         )
+        execution_text = agent_text if agent_text is not None else text
         results = {}
         try:
             if mode == "coordinator" and len(effective_agent_ids) > 1:
@@ -990,7 +999,7 @@ class AgentRuntime:
                             session_id,
                             agent,
                             "Analyze this task as a specialist. Return findings and "
-                            f"recommended implementation.\n\n{text}",
+                            f"recommended implementation.\n\n{execution_text}",
                             model,
                             attachments,
                             permission,
@@ -1008,7 +1017,7 @@ class AgentRuntime:
                     coordinator_prompt = (
                         "You are coordinator. Complete the user task using worker "
                         "findings. Verify conflicts and produce the final useful result."
-                        f"\n\nUser task:\n{text}\n\nWorker findings:\n{evidence}"
+                        f"\n\nUser task:\n{execution_text}\n\nWorker findings:\n{evidence}"
                     )
                     results[lead] = self._run_agent(
                         run_id,
@@ -1033,7 +1042,7 @@ class AgentRuntime:
                             run_id,
                             session_id,
                             agent,
-                            text,
+                            execution_text,
                             model,
                             attachments,
                             permission,

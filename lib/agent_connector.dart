@@ -438,6 +438,15 @@ abstract class AgentConnector {
   Future<void> dispose();
 }
 
+abstract interface class PersonalizationConnector {
+  Future<String> getGlobalPersonalization();
+  Future<void> setGlobalPersonalization(String value);
+  Future<AgentSession> setSessionPersonalization(
+    String sessionId,
+    String? value,
+  );
+}
+
 class DemoAgentConnector implements AgentConnector {
   DemoAgentConnector({this.delay = const Duration(milliseconds: 80)});
   final Duration delay;

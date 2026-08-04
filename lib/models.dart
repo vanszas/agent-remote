@@ -357,12 +357,13 @@ class AgentSession {
     this.preview = '',
     this.messageCount = 0,
     this.activities = const [],
+    this.personalizationOverride,
   });
   final String id, title, workspaceName, draftText, preview;
   final int messageCount;
   final DateTime createdAt, updatedAt;
   final bool isPinned, isArchived;
-  final String? connectionProfileId, activeModelName;
+  final String? connectionProfileId, activeModelName, personalizationOverride;
   final List<ChatMessage> messages;
   final List<AgentActivity> activities;
   final SessionStatus status;
@@ -392,6 +393,7 @@ class AgentSession {
     preview: preview ?? this.preview,
     messageCount: messageCount ?? this.messageCount,
     activities: activities ?? this.activities,
+    personalizationOverride: personalizationOverride,
   );
   Map<String, Object?> toJson() => {
     'id': id,
@@ -409,6 +411,7 @@ class AgentSession {
     'preview': preview,
     'messageCount': messageCount,
     'activities': activities.map((e) => e.toJson()).toList(),
+    'personalizationOverride': personalizationOverride,
   };
   factory AgentSession.fromJson(Map<String, Object?> j) => AgentSession(
     id: j['id'] as String? ?? '',
@@ -434,6 +437,7 @@ class AgentSession {
         .whereType<Map>()
         .map((e) => AgentActivity.fromJson(Map<String, Object?>.from(e)))
         .toList(),
+    personalizationOverride: j['personalizationOverride'] as String?,
   );
 }
 

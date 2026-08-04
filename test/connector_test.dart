@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +27,21 @@ class _TaskConnector extends DemoAgentConnector {
 
   @override
   Future<List<AgentTask>> listTasks() async => tasks;
+}
+
+class _EventConnector extends DemoAgentConnector {
+  final controller = StreamController<AgentEvent>.broadcast();
+
+  @override
+  Stream<AgentEvent> get events => controller.stream;
+
+  void emit(AgentEvent event) => controller.add(event);
+
+  @override
+  Future<void> dispose() async {
+    await controller.close();
+    await super.dispose();
+  }
 }
 
 void main() {
@@ -131,4 +147,44 @@ void main() {
       controller.dispose();
     },
   );
+
+  test('stream deltas batch UI notifications', () async {
+    final directory = await Directory.systemTemp.createTemp();
+    addTearDown(() => directory.delete(recursive: true));
+    final connector = _EventConnector();
+    final controller = AppController(
+      connector,
+      LocalStore(directory: directory),
+    );
+    await controller.initialize();
+    await controller.newSession();
+    final sessionId = controller.current!.id;
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    connector.emit(
+      AgentEvent(
+        AgentEventType.messageStarted,
+        sessionId: sessionId,
+        correlationId: 'run',
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    notifications = 0;
+
+    for (var index = 0; index < 20; index++) {
+      connector.emit(
+        AgentEvent(
+          AgentEventType.messageDelta,
+          sessionId: sessionId,
+          correlationId: 'run',
+          text: '$index',
+        ),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(notifications, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(notifications, 1);
+    controller.dispose();
+  });
 }

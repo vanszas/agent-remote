@@ -12,6 +12,8 @@ class AppController extends ChangeNotifier {
   StreamSubscription<AgentEvent>? _sub;
   Timer? _taskTimer;
   Timer? _saveTimer;
+  Timer? _streamNotifyTimer;
+  Future<void>? _workspaceReload;
   bool _taskPollInFlight = false;
   bool _appForeground = true;
   AppUiState _restoredUiState = const AppUiState();
@@ -92,6 +94,27 @@ class AppController extends ChangeNotifier {
       connected = false;
       connectorError = connectionErrorMessage(error);
     }
+    notifyListeners();
+  }
+
+  bool get supportsPersonalization => connector is PersonalizationConnector;
+
+  Future<String> getGlobalPersonalization() =>
+      (connector as PersonalizationConnector).getGlobalPersonalization();
+
+  Future<void> setGlobalPersonalization(String value) =>
+      (connector as PersonalizationConnector).setGlobalPersonalization(value);
+
+  Future<void> setCurrentSessionPersonalization(String? value) async {
+    final session = current;
+    if (session == null || connector is! PersonalizationConnector) return;
+    _replace(
+      await (connector as PersonalizationConnector).setSessionPersonalization(
+        session.id,
+        value,
+      ),
+    );
+    await _save();
     notifyListeners();
   }
 
@@ -425,7 +448,16 @@ class AppController extends ChangeNotifier {
       _saveTimer?.cancel();
       _saveTimer = Timer(const Duration(milliseconds: 350), _save);
     }
-    notifyListeners();
+    if (e.type == AgentEventType.messageDelta) {
+      _streamNotifyTimer ??= Timer(const Duration(milliseconds: 50), () {
+        _streamNotifyTimer = null;
+        notifyListeners();
+      });
+    } else {
+      _streamNotifyTimer?.cancel();
+      _streamNotifyTimer = null;
+      notifyListeners();
+    }
     if (e.type == AgentEventType.messageStarted ||
         e.type == AgentEventType.messageCompleted ||
         e.type == AgentEventType.messageFailed ||
@@ -633,7 +665,17 @@ class AppController extends ChangeNotifier {
     if (loaded != null) await open(loaded);
   }
 
-  Future<void> reloadWorkspaceData({bool fetchGit = false}) async {
+  Future<void> reloadWorkspaceData({bool fetchGit = false}) {
+    final pending = _workspaceReload;
+    if (pending != null) return pending;
+    final reload = _reloadWorkspaceData(fetchGit: fetchGit);
+    _workspaceReload = reload;
+    return reload.whenComplete(() {
+      if (identical(_workspaceReload, reload)) _workspaceReload = null;
+    });
+  }
+
+  Future<void> _reloadWorkspaceData({required bool fetchGit}) async {
     if (connector case final WorkspaceMonitor monitor) {
       if (connector case final GitWorkspaceMonitor snapshotMonitor) {
         final results = await Future.wait([
@@ -726,14 +768,19 @@ class AppController extends ChangeNotifier {
 
   void refresh() => notifyListeners();
 
-  List<AgentSession> get filtered => sessions
-      .where(
-        (s) =>
-            ('$search ${s.title} ${s.messages.map((m) => m.content).join(' ')} ${s.messages.expand((m) => m.attachments).map((a) => a.originalName).join(' ')}')
-                .toLowerCase()
-                .contains(search.toLowerCase()),
-      )
-      .toList();
+  List<AgentSession> get filtered {
+    final query = search.trim().toLowerCase();
+    if (query.isEmpty) return sessions;
+    return sessions
+        .where(
+          (session) =>
+              ('${session.title} ${session.messages.map((message) => message.content).join(' ')} ${session.messages.expand((message) => message.attachments).map((attachment) => attachment.originalName).join(' ')}')
+                  .toLowerCase()
+                  .contains(query),
+        )
+        .toList();
+  }
+
   void _replace(AgentSession s) {
     final i = sessions.indexWhere((x) => x.id == s.id);
     if (i >= 0) sessions[i] = s;
@@ -747,6 +794,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _taskTimer?.cancel();
     _saveTimer?.cancel();
+    _streamNotifyTimer?.cancel();
     _sub?.cancel();
     connector.dispose();
     themeMode.dispose();

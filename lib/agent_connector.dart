@@ -204,7 +204,7 @@ class ProviderQuotaWindow {
     this.resetAt,
   });
   final String id, label;
-  final double usedPercent, remainingPercent;
+  final double? usedPercent, remainingPercent;
   final DateTime? resetAt;
 }
 
@@ -238,6 +238,7 @@ class ProviderUsageSnapshot {
     required this.models,
     required this.recent,
     this.quotaAccounts = const [],
+    this.quotaComplete = false,
     required this.attribution,
     this.active,
     this.reason = '',
@@ -254,6 +255,7 @@ class ProviderUsageSnapshot {
   final List<String> providers, models;
   final List<ProviderUsageEntry> recent;
   final List<ProviderQuotaAccount> quotaAccounts;
+  final bool quotaComplete;
   final DateTime? updatedAt;
 }
 

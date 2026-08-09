@@ -235,11 +235,16 @@ class AgentRemoteApp extends StatelessWidget {
       title: 'Agent Remote',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0891B2),
+          brightness: Brightness.light,
+        ),
         useMaterial3: true,
+        scaffoldBackgroundColor: const Color(0xFFF5F8FC),
         cardTheme: const CardThemeData(
           elevation: 0,
           margin: EdgeInsets.symmetric(vertical: 4),
+          surfaceTintColor: Colors.transparent,
         ),
         appBarTheme: const AppBarTheme(surfaceTintColor: Colors.transparent),
       ),
@@ -247,10 +252,12 @@ class AgentRemoteApp extends StatelessWidget {
         brightness: Brightness.dark,
         useMaterial3: true,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF9DB2FF),
-          secondary: Color(0xFFB7C4FF),
-          surface: Color(0xFF111318),
-          surfaceContainer: Color(0xFF1A1D24),
+          primary: Color(0xFF7DD3FC),
+          secondary: Color(0xFF67E8F9),
+          surface: Color(0xFF0B1220),
+          surfaceContainer: Color(0xFF111F35),
+          surfaceContainerHighest: Color(0xFF172943),
+          onSurfaceVariant: Color(0xFF9AA9C4),
         ),
         scaffoldBackgroundColor: const Color(0xFF0B0D12),
         appBarTheme: const AppBarTheme(
@@ -260,6 +267,7 @@ class AgentRemoteApp extends StatelessWidget {
         cardTheme: const CardThemeData(
           elevation: 0,
           margin: EdgeInsets.symmetric(vertical: 4),
+          surfaceTintColor: Colors.transparent,
         ),
       ),
       themeMode: switch (selectedTheme) {
@@ -6427,7 +6435,10 @@ class _UsagePageState extends State<UsagePage> {
                   ),
                   children: [
                     _ActiveModelCard(value.active),
-                    _QuotaTracker(value.quotaAccounts),
+                    _QuotaTracker(
+                      value.quotaAccounts,
+                      complete: value.quotaComplete,
+                    ),
                     Card(
                       color: Theme.of(
                         context,
@@ -6491,8 +6502,9 @@ class _UsagePageState extends State<UsagePage> {
 }
 
 class _QuotaTracker extends StatelessWidget {
-  const _QuotaTracker(this.accounts);
+  const _QuotaTracker(this.accounts, {required this.complete});
   final List<ProviderQuotaAccount> accounts;
+  final bool complete;
 
   @override
   Widget build(BuildContext context) {
@@ -6511,6 +6523,15 @@ class _QuotaTracker extends StatelessWidget {
             Text('${accounts.where((value) => value.active).length} aktif'),
           ],
         ),
+        const SizedBox(height: 4),
+        Text(
+          complete
+              ? "Data resmi 9Router lengkap."
+              : accounts.isEmpty
+              ? "Data quota belum tersedia dari 9Router."
+              : "Data quota belum lengkap; akun error tetap ditampilkan.",
+          style: TextStyle(color: colors.onSurfaceVariant),
+        ),
         const SizedBox(height: 8),
         if (accounts.isEmpty)
           const Card(
@@ -6525,12 +6546,24 @@ class _QuotaTracker extends StatelessWidget {
                 account.active &&
                 account.status == 'active' &&
                 !account.limitReached;
-            final remaining = account.quotas.fold<double>(
-              100,
-              (lowest, quota) => quota.remainingPercent < lowest
-                  ? quota.remainingPercent
-                  : lowest,
-            );
+            final remaining = account.quotas
+                .map(
+                  (quota) =>
+                      quota.remainingPercent ??
+                      (quota.usedPercent == null
+                          ? null
+                          : 100 - quota.usedPercent!),
+                )
+                .whereType<double>()
+                .fold<double?>(null, (lowest, value) {
+                  if (lowest == null || value < lowest) return value;
+                  return lowest;
+                });
+            final windowLabels = account.quotas
+                .map((quota) => quota.label.trim())
+                .where((label) => label.isNotEmpty)
+                .toSet()
+                .toList();
             return Card(
               margin: const EdgeInsets.only(bottom: 8),
               child: ExpansionTile(
@@ -6562,8 +6595,12 @@ class _QuotaTracker extends StatelessWidget {
                     account.provider,
                     if (account.plan.isNotEmpty) account.plan,
                     if (account.model.isNotEmpty) account.model,
+                    if (windowLabels.isNotEmpty)
+                      windowLabels.take(2).join(" · "),
                     if (account.quotas.isNotEmpty)
-                      '${remaining.toStringAsFixed(0)}% tersisa',
+                      remaining == null
+                          ? 'Quota tidak tersedia'
+                          : '${remaining.toStringAsFixed(0)}% tersisa',
                     account.active ? account.status : 'nonaktif',
                   ].join(' • '),
                   maxLines: 2,
@@ -6582,8 +6619,18 @@ class _QuotaTracker extends StatelessWidget {
                       ),
                     )
                   else
-                    ...account.quotas.map(
-                      (quota) => Padding(
+                    ...account.quotas.map((quota) {
+                      final remainingPercent =
+                          quota.remainingPercent ??
+                          (quota.usedPercent == null
+                              ? null
+                              : 100 - quota.usedPercent!);
+                      final usedPercent =
+                          quota.usedPercent ??
+                          (remainingPercent == null
+                              ? null
+                              : 100 - remainingPercent);
+                      return Padding(
                         padding: const EdgeInsets.only(top: 10),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -6599,25 +6646,38 @@ class _QuotaTracker extends StatelessWidget {
                                   ),
                                 ),
                                 Text(
-                                  '${quota.remainingPercent.toStringAsFixed(0)}% tersisa',
+                                  remainingPercent == null
+                                      ? 'Data quota tidak tersedia'
+                                      : '${remainingPercent.toStringAsFixed(0)}% tersisa',
                                 ),
                               ],
                             ),
                             const SizedBox(height: 6),
-                            LinearProgressIndicator(
-                              value: quota.usedPercent / 100,
-                            ),
-                            if (quota.resetAt != null) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                'Reset ${formatLocalClock(quota.resetAt!)}',
-                                style: Theme.of(context).textTheme.bodySmall,
+                            if (usedPercent == null)
+                              Container(
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: colors.surfaceContainerHighest,
+                                  borderRadius: BorderRadius.circular(99),
+                                ),
+                              )
+                            else
+                              LinearProgressIndicator(
+                                value: usedPercent / 100,
+                                minHeight: 7,
+                                borderRadius: BorderRadius.circular(99),
                               ),
-                            ],
+                            const SizedBox(height: 4),
+                            Text(
+                              quota.resetAt == null
+                                  ? 'Reset waktu tidak tersedia'
+                                  : 'Reset ${formatLocalClock(quota.resetAt!)}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
                           ],
                         ),
-                      ),
-                    ),
+                      );
+                    }),
                 ],
               ),
             );

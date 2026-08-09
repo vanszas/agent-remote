@@ -46,6 +46,50 @@ def test_antigravity_quota_parses_official_remaining_fraction(monkeypatch):
     }]
 
 
+def test_codex_quota_labels_window_from_server_duration(monkeypatch):
+    remote_server.NINE_ROUTER_QUOTA_CACHE.clear()
+
+    class Response:
+        def read(self):
+            return json.dumps({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 34,
+                        "limit_window_seconds": 604800,
+                        "reset_at": 1786828655,
+                    },
+                    "secondary_window": {
+                        "used_percent": 12,
+                        "limit_window_seconds": 18000,
+                        "reset_at": 1786828655,
+                    },
+                },
+            }).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(remote_server.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    quota = remote_server._codex_quota("codex", {"accessToken": "test"})
+
+    assert [row["label"] for row in quota["quotas"]] == ["Mingguan", "Sesi 5 jam"]
+    assert quota["quotas"][0]["window_seconds"] == 604800
+
+
+def test_quota_snapshot_is_incomplete_when_active_account_has_error():
+    complete = [
+        {"active": True, "status": "active", "quotas": [{"label": "Mingguan"}]},
+    ]
+    incomplete = complete + [
+        {"active": True, "status": "error", "quotas": []},
+    ]
+    assert remote_server._quota_snapshot_complete(complete) is True
+    assert remote_server._quota_snapshot_complete(incomplete) is False
+
+
 def test_provider_usage_marks_recent_history_active_without_live_cli(monkeypatch, tmp_path):
     db_path = tmp_path / "usage.sqlite"
     request_time = datetime.now(timezone.utc)

@@ -47,6 +47,13 @@ def test_quota_rows_only_uses_real_quota_data():
     assert quota_rows({"quota_accounts": []}) == []
 
 
+def test_quota_rows_keeps_missing_percentage_unknown():
+    rows = quota_rows({
+        "quota_accounts": [{"name": "Codex", "quotas": [{"label": "Mingguan"}]}],
+    })
+    assert rows[0]["remaining"] is None
+
+
 def test_quota_accounts_groups_rows_under_each_account():
     accounts = quota_accounts({"quota_accounts": [
         {"id": "gemini", "provider": "antigravity", "name": "Gemini", "quotas": [

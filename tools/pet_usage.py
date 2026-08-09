@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import sys
 import threading
@@ -14,7 +15,7 @@ from PIL import Image, ImageTk
 
 from agent_remote_server import provider_usage
 
-PET_USAGE_VERSION = "0.19.1"
+PET_USAGE_VERSION = "0.20.0"
 REFRESH_MS = 60_000
 ACTIVITY_MS = 3_000
 LOOP_MS = 1100
@@ -26,24 +27,28 @@ PET_MUTEX = "Local\\AgentRemote-PetUsage"
 MUTEX_HANDLE = None
 STATE_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AgentRemote" / "pet-usage.json"
 TRANSPARENT = "#00ff00"
-BG = "#12101d"
-HUD_BG = "#071a2a"
-HUD_HEADER = "#061321"
-HUD_EDGE = "#245377"
-HUD_ROW = "#0b2438"
-HUD_ROW_HOVER = "#123b5a"
-TEXT = "#f4efff"
-MUTED = "#9b94aa"
-TRACK = "#292434"
-WHITE = "#fffaff"
-HOT = "#ff7b70"
-GOOD = "#8fd694"
+BG = "#0b1220"
+HUD_BG = "#101d32"
+HUD_HEADER = "#0b172a"
+HUD_EDGE = "#2a4163"
+HUD_ROW = "#152640"
+HUD_ROW_HOVER = "#1d385d"
+TEXT = "#eef4ff"
+MUTED = "#9aa9c4"
+TRACK = "#273852"
+WHITE = "#ffffff"
+HOT = "#ff8f86"
+GOOD = "#72e0a2"
+ACCENT = "#7dd3fc"
+WARNING = "#f6c177"
+SURFACE = "#111f35"
+SURFACE_ELEVATED = "#172943"
 PET_W, PET_H = 134, 145
-BAR_H = 56
-BAR_W = 420
+BAR_H = 64
+BAR_W = 480
 BAR_MAX_ROWS = 6
-BAR_ROW_H = 38
-PANEL_W, PANEL_H = 560, 380
+BAR_ROW_H = 44
+PANEL_W, PANEL_H = 700, 520
 PANEL_GAP = 12
 FRAME_W, FRAME_H = 192, 208
 STATE_ROWS = {"idle": 0, "right": 1, "left": 2, "working": 8}
@@ -73,6 +78,56 @@ def save_state(**changes: object) -> None:
 
 def _number(value: object) -> str:
     return f"{int(value or 0):,}".replace(",", ".")
+
+
+def _percentage(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, number)) if math.isfinite(number) else None
+
+
+def _reset_countdown(seconds: int) -> str:
+    if seconds <= 0:
+        return "menunggu data reset baru"
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days} hari {hours} jam lagi"
+    if hours:
+        return f"{hours} jam {minutes} menit lagi"
+    return f"{max(1, minutes)} menit lagi"
+
+
+def _local_reset_text(value: str) -> str:
+    if not value:
+        return "Reset waktu tidak tersedia"
+    try:
+        reset = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return f"Reset dari server: {value[:24]}"
+    weekdays = ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+    months = (
+        "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+        "Jul", "Agu", "Sep", "Okt", "Nov", "Des",
+    )
+    seconds = int((reset - datetime.now(reset.tzinfo)).total_seconds())
+    absolute = f"{weekdays[reset.weekday()]}, {reset.day:02d} {months[reset.month - 1]} {reset:%H:%M}"
+    return f"Reset {absolute} · {_reset_countdown(seconds)}"
+
+
+def _observed_text(value: object) -> str:
+    if not value:
+        return "belum ada sinkronisasi"
+    try:
+        observed = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone()
+        return f"diperbarui {observed:%H:%M:%S}"
+    except ValueError:
+        return "waktu sinkronisasi tidak tersedia"
 
 
 def animation_delay() -> int:
@@ -192,25 +247,41 @@ def quota_rows(snapshot: dict) -> list[dict]:
             rows.append({"label": "QUOTA", "account": name, "provider": account.get("provider") or "unknown", "remaining": None, "reset": "", "active": bool(account.get("active")), "status": account.get("status") or "unavailable"})
             continue
         for quota in quotas:
+            remaining = _percentage(quota.get("remaining_percent"))
             rows.append({
                 "label": quota.get("label") or "QUOTA", "account": name,
                 "provider": account.get("provider") or "unknown",
-                "remaining": max(0.0, min(100.0, float(quota.get("remaining_percent") or 0))),
-                "reset": quota.get("reset_at") or "", "active": bool(account.get("active")),
+                "remaining": remaining,
+                "reset": quota.get("reset_at") or "",
+                "active": bool(account.get("active")),
                 "status": account.get("status") or "",
             })
     return rows
 
 
+def _quota_window_summary(rows: list[dict]) -> str:
+    labels = []
+    for row in rows:
+        label = str(row.get("label") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    if not labels:
+        return "tanpa data quota"
+    visible = " · ".join(labels[:2])
+    return visible if len(labels) <= 2 else f"{visible} +{len(labels) - 2}"
+
 def quota_accounts(snapshot: dict) -> list[dict]:
     groups = []
     for account in snapshot.get("quota_accounts") or []:
         name = str(account.get("name") or account.get("provider") or "9Router")
+        rows = quota_rows({"quota_accounts": [account]})
         groups.append({
             "id": str(account.get("id") or f"{account.get('provider')}:{name}"),
             "name": name, "provider": account.get("provider") or "unknown",
             "status": account.get("status") or "unavailable",
-            "rows": [row for row in quota_rows({"quota_accounts": [account]})],
+            "error": account.get("error") or "",
+            "rows": rows,
+            "window_summary": _quota_window_summary(rows),
         })
     return groups
 
@@ -448,7 +519,7 @@ class UsagePet:
         self.canvas.configure(cursor="hand2" if index is not None else "arrow")
         if index is None or index >= len(self._bar_rows):
             if self._bar_header_hint is not None:
-                self.canvas.itemconfigure(self._bar_header_hint, text="HOVER USAGE  ·  CLICK DETAILS")
+                self.canvas.itemconfigure(self._bar_header_hint, text="ARAHKAN  ·  KLIK DETAIL")
             return
         current = self._bar_rows[index]
         self.canvas.itemconfigure(current["background"], fill=HUD_ROW_HOVER)
@@ -488,14 +559,14 @@ class UsagePet:
         state_color = GOOD if working else HOT if state_label == "RECENT" else MUTED
         live_dot = self.canvas.create_rectangle(12, 9, 18, 15, fill=state_color, outline="", tags=tag)
         self.canvas.create_text(26, 13, text=f"{state_label}  {len(rows)} USAGE", fill=WHITE, font=("Consolas", 9, "bold"), anchor="w", tags=tag)
-        self._bar_header_hint = self.canvas.create_text(BAR_W - 12, 13, text="HOVER USAGE  ·  CLICK DETAILS", fill=MUTED, font=("Consolas", 7, "bold"), anchor="e", tags=tag)
+        self._bar_header_hint = self.canvas.create_text(BAR_W - 12, 13, text="ARAHKAN  ·  KLIK DETAIL", fill=MUTED, font=("Consolas", 7, "bold"), anchor="e", tags=tag)
         header_tag = "usage-header"
         self.canvas.addtag_withtag(header_tag, live_dot)
         self.canvas.addtag_withtag(header_tag, self._bar_header_hint)
         self.canvas.tag_bind(header_tag, "<Button-1>", lambda _event: self._show_panel())
         self.canvas.create_line(10, 26, BAR_W - 10, 26, fill=HUD_EDGE, tags=tag)
         if overflow:
-            self.canvas.create_text(BAR_W - 12, height - 7, text=f"+{overflow} MORE IN DETAILS", fill=MUTED, font=("Consolas", 7, "bold"), anchor="e", tags=tag)
+            self.canvas.create_text(BAR_W - 12, height - 7, text=f"+{overflow} DI PANEL DETAIL", fill=MUTED, font=("Consolas", 7, "bold"), anchor="e", tags=tag)
         for index, row in enumerate(rows):
             row_tag = f"usage-row-{index}"
             y = 30 + index * BAR_ROW_H
@@ -594,7 +665,7 @@ class UsagePet:
 
     def _toggle_panel(self) -> None:
         if self.panel and self.panel.winfo_exists() and self.panel.state() == "normal":
-            self.panel.withdraw()
+            self._hide_panel()
             return
         self._show_panel()
 
@@ -632,12 +703,13 @@ class UsagePet:
             self.panel.overrideredirect(True)
             self.panel.attributes("-topmost", True)
             self.panel.geometry(f"{PANEL_W}x{PANEL_H}+0+0")
-            self.panel.bind("<Escape>", lambda _event: self.panel.withdraw())
+            self.panel.bind("<Escape>", lambda _event: self._hide_panel())
             self.panel.bind("<ButtonPress-1>", self._panel_drag_begin)
             self.panel.bind("<B1-Motion>", self._panel_drag_move)
             self.panel.bind("<ButtonRelease-1>", self._panel_drag_end)
         self.panel.deiconify()
         self.panel.lift()
+        self.canvas.itemconfigure(self.sprite, state="hidden")
         self._position_panel()
         self._render()
 
@@ -786,36 +858,46 @@ class UsagePet:
 
     @staticmethod
     def _reset_label(value: str) -> str:
-        if not value:
-            return "reset tidak tersedia"
-        try:
-            reset = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
-            return "reset " + reset.strftime("%a %H:%M")
-        except ValueError:
-            return "reset " + value[:16]
+        return _local_reset_text(value)
 
     def _render(self) -> None:
         if self.panel is None or not self.panel.winfo_exists():
             return
         accounts = quota_accounts(self.snapshot)
         if not accounts:
-            accounts = [{"id": "local", "name": "9Router local", "provider": "unknown", "status": "unavailable", "rows": []}]
-        shown_rows = sum(len(account["rows"]) for account in accounts if account["id"] in self.expanded_accounts)
-        content_h = 142 + 46 * max(1, len(accounts)) + 74 * shown_rows + 20
+            accounts = [{
+                "id": "local",
+                "name": "9Router lokal",
+                "provider": "unknown",
+                "status": "unavailable",
+                "error": self.snapshot.get("reason") or "Quota belum tersedia.",
+                "rows": [],
+            }]
         panel_w = max(PANEL_W, self.panel.winfo_width())
         panel_h = max(PANEL_H, self.panel.winfo_height())
+        content_h = 224
+        for account in accounts:
+            content_h += 68
+            if account["id"] in self.expanded_accounts:
+                content_h += 108 * len(account["rows"]) if account["rows"] else 64
         self.panel.geometry(f"{panel_w}x{panel_h}+{self.panel.winfo_x()}+{self.panel.winfo_y()}")
         for child in self.panel.winfo_children():
             child.destroy()
         self._panel_actions = []
-        viewport_w = max(PANEL_W - 14, panel_w - 14)
-        right = viewport_w - 20
-        footer_h = 58
+        viewport_w = max(PANEL_W - 18, panel_w - 18)
+        right = viewport_w - 28
+        footer_h = 76
         footer = Canvas(self.panel, height=footer_h, bg=BG, highlightthickness=0)
         footer.pack(side="bottom", fill="x")
         c = Canvas(self.panel, width=viewport_w, height=panel_h - footer_h, bg=BG, highlightthickness=0)
         scrollbar = Scrollbar(self.panel, orient="vertical", command=c.yview)
-        c.configure(yscrollcommand=lambda first, last: (scrollbar.set(first, last), setattr(self, "panel_scroll", float(first))), scrollregion=(0, 0, viewport_w, max(panel_h - footer_h, content_h)))
+        c.configure(
+            yscrollcommand=lambda first, last: (
+                scrollbar.set(first, last),
+                setattr(self, "panel_scroll", float(first)),
+            ),
+            scrollregion=(0, 0, viewport_w, max(panel_h - footer_h, content_h)),
+        )
         c.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         c.bind("<ButtonPress-1>", self._panel_drag_begin)
@@ -823,58 +905,96 @@ class UsagePet:
         c.bind("<ButtonRelease-1>", self._panel_drag_end)
         c.bind("<MouseWheel>", lambda event: c.yview_scroll(-int(event.delta / 120), "units"))
         c.yview_moveto(self.panel_scroll)
-        c.create_rectangle(0, 0, viewport_w, 52, fill=BG, outline="")
-        c.create_text(26, 28, text="9ROUTER", fill=WHITE, font=("Consolas", 13, "bold"), anchor="w")
-        c.create_text(right, 28, text="24H    ALL", fill=MUTED, font=("Consolas", 10, "bold"), anchor="e")
-        c.create_line(26, 52, right, 52, fill=TRACK)
+        c.create_rectangle(0, 0, viewport_w, content_h, fill=BG, outline="")
+        c.create_rectangle(0, 0, viewport_w, 92, fill=HUD_HEADER, outline="")
+        c.create_rectangle(0, 0, 8, 92, fill=ACCENT, outline="")
+        c.create_text(30, 28, text="AGENT REMOTE", fill=WHITE, font=("Segoe UI", 17, "bold"), anchor="w")
+        c.create_text(30, 59, text="Monitor quota 9Router", fill=MUTED, font=("Segoe UI", 10), anchor="w")
+        if not self.snapshot:
+            connection_label, connection_color = "MENUNGGU DATA", MUTED
+        elif self.snapshot.get("available") and self.snapshot.get("quota_complete"):
+            connection_label, connection_color = "DATA LIVE", GOOD
+        elif self.snapshot.get("available"):
+            connection_label, connection_color = "DATA TIDAK LENGKAP", WARNING
+        else:
+            connection_label, connection_color = "OFFLINE", HOT
+        c.create_rectangle(right - 168, 22, right, 50, fill=SURFACE_ELEVATED, outline=connection_color)
+        c.create_text(right - 84, 36, text=connection_label, fill=connection_color, font=("Segoe UI", 9, "bold"), anchor="c")
+        c.create_text(right, 70, text=f"PC · 24 jam · {_observed_text(self.snapshot.get('observed_at'))}", fill=MUTED, font=("Segoe UI", 9), anchor="e")
 
         model, summary = usage_summary(self.snapshot)
         working = is_working(self.snapshot)
         active = self.snapshot.get("active") or {}
         activity_source = str(active.get("activity_source") or "")
-        state_label = "PULSE" if working and active.get("is_approximate") else "WORKING" if working else "RECENT" if activity_source == "recent_request" else "IDLE"
-        state_color = GOOD if working else HOT if state_label == "RECENT" else MUTED
-        c.create_text(26, 78, text="PACE · 24H", fill=MUTED, font=("Consolas", 9, "bold"), anchor="w")
-        c.create_text(126, 78, text=state_label, fill=state_color, font=("Consolas", 9, "bold"), anchor="w")
-        c.create_text(right, 78, text=model, fill=TEXT, font=("Consolas", 10), anchor="e", width=max(220, right - 150))
-        c.create_text(26, 105, text=summary, fill=TEXT, font=("Segoe UI", 10), anchor="w")
+        state_label = "PULSE" if working and active.get("is_approximate") else "BEKERJA" if working else "BARU SELESAI" if activity_source == "recent_request" else "IDLE"
+        state_color = GOOD if working else HOT if activity_source == "recent_request" else MUTED
+        c.create_rectangle(20, 112, right, 194, fill=SURFACE, outline=HUD_EDGE)
+        c.create_text(38, 134, text="AKTIVITAS 24 JAM", fill=MUTED, font=("Segoe UI", 9, "bold"), anchor="w")
+        c.create_text(right - 20, 134, text=state_label, fill=state_color, font=("Segoe UI", 9, "bold"), anchor="e")
+        c.create_text(38, 160, text=model, fill=WHITE, font=("Segoe UI", 12, "bold"), anchor="w", width=max(260, right - 290))
+        c.create_text(right - 20, 160, text=summary, fill=TEXT, font=("Segoe UI", 10), anchor="e")
+        c.create_text(38, 181, text="Angka quota berasal dari response 9Router. Tidak ada estimasi.", fill=MUTED, font=("Segoe UI", 8), anchor="w")
 
-        y = 142
+        c.create_text(28, 222, text="QUOTA PER AKUN", fill=WHITE, font=("Segoe UI", 11, "bold"), anchor="w")
+        c.create_text(right, 222, text=f"{len(accounts)} akun", fill=MUTED, font=("Segoe UI", 9), anchor="e")
+        y = 246
         for account in accounts:
             expanded = account["id"] in self.expanded_accounts
-            marker = "v" if expanded else ">"
-            title = f"{marker} [{provider_badge(account['provider'])}] {account['name']}"
+            marker = "⌄" if expanded else "›"
+            title = str(account["name"])
             status = str(account.get("status") or "unavailable").lower()
-            status_label = {"active": "ACTIVE", "error": "ERROR", "inactive": "OFFLINE", "unavailable": "OFFLINE"}.get(status, status.upper())
-            detail = f"{len(account['rows'])} QUOTA" if account["rows"] else status_label
+            status_label = {
+                "active": "TERHUBUNG",
+                "error": "ERROR",
+                "inactive": "NONAKTIF",
+                "unavailable": "DATA TIDAK TERSEDIA",
+            }.get(status, status.upper())
             status_color = GOOD if status == "active" else HOT if status == "error" else MUTED
-            c.create_rectangle(20, y - 17, right, y + 20, fill="#17111f" if expanded else BG, outline=TRACK)
-            c.create_text(28, y, text=title, fill=WHITE, font=("Consolas", 10, "bold"), anchor="w")
-            c.create_text(right - 8, y, text=detail, fill=status_color, font=("Consolas", 9, "bold"), anchor="e")
-            self._panel_actions.append((20, y - 17, right, y + 20, lambda account_id=account["id"]: self._toggle_account(account_id)))
-            y += 46
+            header_top = y
+            header_bottom = y + 56
+            c.create_rectangle(20, header_top, right, header_bottom, fill=SURFACE_ELEVATED if expanded else SURFACE, outline=HUD_EDGE)
+            c.create_rectangle(36, header_top + 15, 98, header_top + 41, fill=HUD_ROW, outline=HUD_EDGE)
+            c.create_text(67, header_top + 28, text=provider_badge(account["provider"]), fill=ACCENT, font=("Consolas", 8, "bold"), anchor="c")
+            c.create_text(116, header_top + 20, text=f"{marker}  {title}", fill=WHITE, font=("Segoe UI", 10, "bold"), anchor="w", width=max(260, right - 300))
+            c.create_text(right - 20, header_top + 19, text=status_label, fill=status_color, font=("Segoe UI", 8, "bold"), anchor="e")
+            count_label = f"{len(account['rows'])} jendela" if account["rows"] else "tanpa data quota"
+            window_summary = str(account.get("window_summary") or "tanpa data quota")
+            quota_summary = "quota tidak tersedia"
+            known_remaining = [row.get("remaining") for row in account["rows"] if row.get("remaining") is not None]
+            if known_remaining:
+                quota_summary = f"{min(known_remaining):.0f}% tersisa"
+            c.create_text(right - 20, header_top + 39, text=f"{quota_summary} · {count_label} · {window_summary}", fill=MUTED, font=("Segoe UI", 8), anchor="e", width=right - 250)
+            self._panel_actions.append((20, header_top, right, header_bottom, lambda account_id=account["id"]: self._toggle_account(account_id)))
+            y = header_bottom + 12
             if not expanded:
                 continue
             for row in account["rows"]:
-                remaining = row["remaining"]
+                card_top = y
+                card_bottom = y + 96
+                remaining = row.get("remaining")
                 known = remaining is not None
-                color = HOT if known and remaining <= 20 else GOOD if known else MUTED
-                quota_right = right - 16
-                quota_width = quota_right - 38
-                c.create_text(38, y, text=f"{str(row['label']).upper()}  {self._reset_label(str(row['reset']))}", fill=TEXT, font=("Consolas", 9, "bold"), anchor="w")
-                c.create_text(quota_right, y, text=f"{remaining:.0f}% LEFT" if known else str(row["status"]).upper(), fill=color, font=("Consolas", 10, "bold"), anchor="e")
-                c.create_rectangle(38, y + 21, quota_right, y + 27, fill=TRACK, outline="")
+                color = HOT if known and remaining <= 20 else GOOD if known else WARNING
+                quota_right = right - 20
+                quota_width = quota_right - 52
+                c.create_rectangle(36, card_top, quota_right, card_bottom, fill=SURFACE, outline=TRACK)
+                c.create_text(52, card_top + 20, text=str(row["label"]), fill=WHITE, font=("Segoe UI", 10, "bold"), anchor="w")
+                c.create_text(quota_right - 14, card_top + 20, text=f"{remaining:.0f}% tersisa" if known else "DATA TIDAK TERSEDIA", fill=color, font=("Segoe UI", 9, "bold"), anchor="e")
+                c.create_text(52, card_top + 44, text=self._reset_label(str(row["reset"])), fill=MUTED, font=("Segoe UI", 8), anchor="w")
+                c.create_rectangle(52, card_top + 66, quota_right - 14, card_top + 74, fill=TRACK, outline="")
                 if known:
-                    c.create_rectangle(38, y + 21, 38 + quota_width * remaining / 100, y + 27, fill=color, outline="")
-                y += 74
+                    c.create_rectangle(52, card_top + 66, 52 + quota_width * remaining / 100, card_top + 74, fill=color, outline="")
+                y = card_bottom + 12
+            if not account["rows"]:
+                c.create_text(52, y + 20, text=account.get("error") or "Provider tidak mengirim data quota.", fill=MUTED, font=("Segoe UI", 9), anchor="w", width=right - 80)
+                y += 52
 
         footer.create_line(26, 0, panel_w - 26, 0, fill=TRACK)
         footer.bind("<ButtonPress-1>", self._panel_drag_begin)
         footer.bind("<B1-Motion>", self._panel_drag_move)
         footer.bind("<ButtonRelease-1>", self._panel_drag_end)
-        button_width = 68
-        button_gap = 6
-        button_start = max(14, (panel_w - (7 * button_width + 6 * button_gap)) // 2)
+        button_width = 82
+        button_gap = 7
+        button_start = max(16, (panel_w - (7 * button_width + 6 * button_gap)) // 2)
         buttons = (
             ("IDLE", not self.roaming, lambda: self._set_roaming(False)),
             ("ROAM", self.roaming, lambda: self._set_roaming(True)),
@@ -882,26 +1002,25 @@ class UsagePet:
             ("BURN ON" if self.burn_effect else "BURN OFF", self.burn_effect, self._toggle_burn),
             (f"SIZE {self.pet_scale:.2g}x", False, self._prompt_scale),
             (self.pet_filter.upper(), self.pet_filter == "sharp", self._toggle_filter),
-            ("HIDE", False, self._hide_panel),
+            ("TUTUP", False, self._hide_panel),
         )
         for index, (label, selected, action) in enumerate(buttons):
-            self._button(footer, button_start + index * (button_width + button_gap), 14, label, selected, action, width=button_width)
+            self._button(footer, button_start + index * (button_width + button_gap), 20, label, selected, action, width=button_width)
         grip = "resize-grip"
-        footer.create_text(panel_w - 12, 46, text="◢", fill=MUTED, font=("Consolas", 11), tags=grip)
+        footer.create_text(panel_w - 14, 59, text="◢", fill=MUTED, font=("Segoe UI", 10), tags=grip)
         footer.tag_bind(grip, "<ButtonPress-1>", self._resize_begin)
         footer.tag_bind(grip, "<B1-Motion>", self._resize_move)
         footer.tag_bind(grip, "<ButtonRelease-1>", self._resize_end)
-
     def _button(self, c: Canvas, x: int, y: int, label: str, selected: bool, action, width: int = 74) -> None:
         tag = f"button-{x}-{y}"
-        fill, text = (WHITE, BG) if selected else (BG, WHITE)
-        hover_fill = "#d9d0ff" if selected else "#2e263d"
-        rect_id = c.create_rectangle(x, y, x + width, y + 30, fill=fill, outline=WHITE, tags=tag)
-        c.create_text(x + width // 2, y + 15, text=label, fill=text, font=("Consolas", 8, "bold"), tags=tag)
+        fill, text = (ACCENT, BG) if selected else (SURFACE, WHITE)
+        hover_fill = "#a7e3ff" if selected else HUD_ROW_HOVER
+        rect_id = c.create_rectangle(x, y, x + width, y + 34, fill=fill, outline=HUD_EDGE, tags=tag)
+        c.create_text(x + width // 2, y + 17, text=label, fill=text, font=("Segoe UI", 8, "bold"), tags=tag)
         # ponytail: native Canvas hover fix - update item direct, avoid tag fill bug.
         c.tag_bind(tag, "<Enter>", lambda _event, r=rect_id, h=hover_fill: c.itemconfigure(r, fill=h))
         c.tag_bind(tag, "<Leave>", lambda _event, r=rect_id, f=fill: c.itemconfigure(r, fill=f))
-        self._panel_actions.append((x, y, x + width, y + 30, action))
+        self._panel_actions.append((x, y, x + width, y + 34, action))
 
     def _resize_begin(self, event) -> None:
         self._panel_resize_start = (event.x_root, event.y_root, self.panel.winfo_width(), self.panel.winfo_height())
@@ -936,6 +1055,7 @@ class UsagePet:
     def _hide_panel(self) -> None:
         if self.panel:
             self.panel.withdraw()
+        self.canvas.itemconfigure(self.sprite, state="normal")
 
     def _prompt_scale(self) -> None:
         value = simpledialog.askfloat("Ukuran Maha", "Skala 0.5 sampai 2.0", initialvalue=self.pet_scale, minvalue=0.5, maxvalue=2.0, parent=self.panel)

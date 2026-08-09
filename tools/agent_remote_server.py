@@ -3,6 +3,7 @@ import ctypes
 import difflib
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -1092,6 +1093,58 @@ def _quota_reset_at(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _quota_percent(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, number)) if math.isfinite(number) else None
+
+
+def _quota_window_seconds(window: dict) -> int | None:
+    for key in (
+        "limit_window_seconds",
+        "window_seconds",
+        "windowSeconds",
+        "limitWindowSeconds",
+    ):
+        value = window.get(key)
+        if value is None:
+            continue
+        try:
+            seconds = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if seconds > 0:
+            return seconds
+    return None
+
+
+def _quota_window_label(key: str, seconds: int | None) -> str:
+    if seconds is not None:
+        if 4 * 3600 <= seconds <= 6 * 3600:
+            return "Sesi 5 jam"
+        if 6 * 86400 <= seconds <= 8 * 86400:
+            return "Mingguan"
+        if seconds % 86400 == 0:
+            return f"Jendela {seconds // 86400} hari"
+        if seconds % 3600 == 0:
+            return f"Jendela {seconds // 3600} jam"
+        if seconds % 60 == 0:
+            return f"Jendela {seconds // 60} menit"
+    return "Jendela utama" if key == "primary_window" else "Jendela sekunder"
+
+
+def _quota_snapshot_complete(accounts: list[dict]) -> bool:
+    active_accounts = [account for account in accounts if account.get("active")]
+    return bool(active_accounts) and all(
+        account.get("status") == "active" and bool(account.get("quotas"))
+        for account in active_accounts
+    )
+
+
 def nine_router_mobile_key(db_path: Path | None = None) -> str:
     configured = os.environ.get('AGENT_REMOTE_9ROUTER_MOBILE_KEY', '').strip()
     if configured:
@@ -1145,15 +1198,22 @@ def _codex_quota(connection_id: str, data: dict) -> dict:
         if not isinstance(rate, dict):
             return []
         rows = []
-        for key, label in (("primary_window", "Sesi 5 jam"), ("secondary_window", "Mingguan")):
+        for key in ("primary_window", "secondary_window"):
             window = rate.get(key)
             if not isinstance(window, dict):
                 continue
-            used = max(0.0, min(100.0, float(window.get("used_percent") or window.get("percent_used") or 0)))
+            window_seconds = _quota_window_seconds(window)
+            used = _quota_percent(
+                window.get("used_percent")
+                if window.get("used_percent") is not None
+                else window.get("percent_used")
+            )
             rows.append({
                 "id": f"{prefix}{'session' if key == 'primary_window' else 'weekly'}",
-                "label": f"{prefix.title() + ' ' if prefix else ''}{label}",
-                "used_percent": used, "remaining_percent": max(0.0, 100.0 - used),
+                "label": f"{prefix.title() + ' ' if prefix else ''}{_quota_window_label(key, window_seconds)}",
+                "used_percent": used,
+                "remaining_percent": None if used is None else max(0.0, 100.0 - used),
+                "window_seconds": window_seconds,
                 "reset_at": _quota_reset_at(
                     window.get("reset_at") or window.get("resets_at") or window.get("resetAt")
                 ),
@@ -1307,7 +1367,7 @@ def provider_usage(
         "models": [],
         "recent": [],
         "quota_accounts": [],
-        "quota_complete": include_quotas,
+        "quota_complete": False,
         "observed_at": now.isoformat().replace("+00:00", "Z"),
         "attribution": "all_9router_requests_on_pc",
     }
@@ -1489,6 +1549,7 @@ def provider_usage(
             "has_live_process": False,
             "is_approximate": True,
         }
+    quota_accounts = nine_router_quota_accounts(path) if include_quotas else []
     return {
         "available": True,
         "source": "9router",
@@ -1505,8 +1566,8 @@ def provider_usage(
         "providers": sorted({row["provider"] for row in filter_rows if row["provider"]}),
         "models": sorted({row["model"] for row in filter_rows if row["model"]}),
         "recent": recent,
-        "quota_accounts": nine_router_quota_accounts(path) if include_quotas else [],
-        "quota_complete": include_quotas,
+        "quota_accounts": quota_accounts,
+        "quota_complete": _quota_snapshot_complete(quota_accounts),
         "observed_at": now.isoformat().replace("+00:00", "Z"),
         "updated_at": now_iso(),
         'scope': scope,

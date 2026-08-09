@@ -6,8 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import agent_remote_setup
 
 
-def test_nine_router_command_uses_background_windows_flags(monkeypatch):
-    executable = Path(r"C:\Users\ADMIN\AppData\Roaming\npm\9router.cmd")
+def test_nine_router_command_uses_background_windows_flags(monkeypatch, tmp_path):
+    executable = tmp_path / "9router.cmd"
     monkeypatch.setattr(agent_remote_setup.shutil, "which", lambda _command: str(executable))
 
     assert agent_remote_setup.nine_router_command() == [

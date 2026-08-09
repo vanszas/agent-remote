@@ -103,6 +103,7 @@ ProviderUsageSnapshot decodeProviderUsage(Map<String, Object?> data) {
           (item) => _decodeProviderUsageEntry(Map<String, Object?>.from(item)),
         )
         .toList(),
+    quotaComplete: data['quota_complete'] == true,
     quotaAccounts: (data['quota_accounts'] as List? ?? const [])
         .whereType<Map>()
         .map((item) {
@@ -125,10 +126,9 @@ ProviderUsageSnapshot decodeProviderUsage(Map<String, Object?> data) {
                   return ProviderQuotaWindow(
                     id: quota['id'] as String? ?? '',
                     label: quota['label'] as String? ?? 'Quota',
-                    usedPercent:
-                        (quota['used_percent'] as num?)?.toDouble() ?? 0,
-                    remainingPercent:
-                        (quota['remaining_percent'] as num?)?.toDouble() ?? 0,
+                    usedPercent: (quota['used_percent'] as num?)?.toDouble(),
+                    remainingPercent: (quota['remaining_percent'] as num?)
+                        ?.toDouble(),
                     resetAt: _decodeDateTime(quota['reset_at']),
                   );
                 })

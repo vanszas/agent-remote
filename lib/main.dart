@@ -32,6 +32,10 @@ class AgentRemoteBootstrap extends StatefulWidget {
 class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
   late final AppController controller;
   ConnectionSettingsController? connections;
+  final loadingConnections = ConnectionSettingsController(
+    const ConnectionCatalog(1, []),
+    ConnectionProfileStore(),
+  );
   String stage = 'Menyiapkan Agent Remote';
   String detail = 'Memulai komponen aplikasi';
   double progress = .06;
@@ -125,31 +129,16 @@ class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
   @override
   Widget build(BuildContext context) {
     final settings = connections;
-    if (ready && settings != null) {
-      return AgentRemoteApp(controller: controller, connections: settings);
-    }
-    return MaterialApp(
-      title: 'Agent Remote',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-        cardTheme: const CardThemeData(
-          elevation: 0,
-          margin: EdgeInsets.symmetric(vertical: 4),
-        ),
-        appBarTheme: const AppBarTheme(surfaceTintColor: Colors.transparent),
-      ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorSchemeSeed: const Color(0xFF9DB2FF),
-        useMaterial3: true,
-      ),
-      home: _StartupLoadingScreen(
-        stage: stage,
-        detail: detail,
-        progress: progress,
-      ),
+    return AgentRemoteApp(
+      controller: controller,
+      connections: settings ?? loadingConnections,
+      homeOverride: ready && settings != null
+          ? null
+          : _StartupLoadingScreen(
+              stage: stage,
+              detail: detail,
+              progress: progress,
+            ),
     );
   }
 }
@@ -234,9 +223,11 @@ class AgentRemoteApp extends StatelessWidget {
     super.key,
     required this.controller,
     required this.connections,
+    this.homeOverride,
   });
   final AppController controller;
   final ConnectionSettingsController connections;
+  final Widget? homeOverride;
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<ThemeModeChoice>(
     valueListenable: controller.themeMode,
@@ -276,10 +267,12 @@ class AgentRemoteApp extends StatelessWidget {
         ThemeModeChoice.dark => ThemeMode.dark,
         _ => ThemeMode.system,
       },
-      home: ListenableBuilder(
-        listenable: controller,
-        builder: (_, _) => AppShell(controller, connections),
-      ),
+      home:
+          homeOverride ??
+          ListenableBuilder(
+            listenable: controller,
+            builder: (_, _) => AppShell(controller, connections),
+          ),
     ),
   );
 }

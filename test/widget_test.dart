@@ -26,6 +26,14 @@ void main() {
     expect(find.text('Demo Mode'), findsOneWidget);
   });
 
+  testWidgets('bootstrap transitions without inherited widget assertion', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const app.AgentRemoteBootstrap());
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('task dashboard stays clear and filters on narrow screens', (
     tester,
   ) async {

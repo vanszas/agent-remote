@@ -1,5 +1,8 @@
 # Changelog
 
+## AgentRemote 0.5.0+9 â€” 2026-08-09
+
+- Startup memakai satu MaterialApp agar transisi loading tidak memicu Flutter inherited-widget assertion.
 ## AgentRemote 0.5.0 ? 2026-08-08
 
 - Rebrand produk, package Android, modul server, connector, spec, dan test menjadi `AgentRemote`.

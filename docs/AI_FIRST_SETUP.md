@@ -17,10 +17,11 @@ Gunakan file ini untuk memandu pengguna baru. Ikuti urutan. Satu tahap gagal: be
 AgentRemoteSetup.exe
 ServerStart.exe
 ServerStop.exe
+PetUsage.exe
 AgentRemote-latest.apk
 ```
 
-Keempat file harus satu folder saat setup pertama.
+Kelima file harus satu folder saat setup pertama.
 
 ## Runbook First-run
 

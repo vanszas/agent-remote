@@ -18,7 +18,7 @@ Jalankan satu tahap, validasi, lalu lanjut. Jangan meminta token server pada jal
 1. Minta pengguna login Tailscale pada PC dan HP memakai akun/tailnet sama.
 2. Pastikan kedua perangkat online. Jika belum, berhenti dan minta pengguna menyelesaikan login Tailscale sendiri.
 3. Pastikan `codex --version`, `claude --version`, `gemini --version`, atau `opencode --version` berhasil minimal satu command pada PC.
-4. Minta pengguna membuka `AgentRemoteSetup.exe` dari folder paket, lalu tekan **Tambahkan ke Desktop + Start Menu** dan **Start Server**.
+4. Minta pengguna membuka `AgentRemoteSetup.exe` dari folder paket, lalu tekan **Tambahkan ke Desktop + Start Menu** dan **Start Remote Server**. Mode PC biasa memakai **Nyalakan PET + 9Router**.
 5. Minta pengguna install `AgentRemote-latest.apk`, buka **Pengaturan**, lalu tekan **Scan QR Pairing** dan scan QR pada PC.
 6. Pastikan aplikasi menampilkan PC terhubung. Minta pengguna memilih folder kerja, lalu buat **Session baru**. Folder tanpa session juga harus menampilkan tombol **Session baru**.
 7. Kirim smoke check tanpa perubahan file: `Tampilkan nama workspace dan agent yang tersedia. Jangan mengubah file.`
@@ -414,7 +414,7 @@ Install agent CLI atau perbaiki `PATH`, lalu restart ServerStart.
 - [ ] IP Tailscale PC sudah dicatat.
 - [ ] Minimal satu CLI agent berhasil lewat PowerShell.
 - [ ] Token `AGENT_REMOTE_TOKEN` dibuat acak.
-- [ ] ServerStart dan ServerStop berada satu folder.
+- [ ] ServerStart, ServerStop, dan PetUsage berada satu folder.
 - [ ] Server `/api/status` mengembalikan `ok: true`.
 - [ ] APK berhasil dipasang.
 - [ ] Profile HP memakai endpoint dan token yang benar.

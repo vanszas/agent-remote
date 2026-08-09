@@ -1,9 +1,9 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hermes_remote/agent_connector.dart';
-import 'package:hermes_remote/app_controller.dart';
-import 'package:hermes_remote/hermes_remote_connector.dart';
+import 'package:agent_remote/agent_connector.dart';
+import 'package:agent_remote/app_controller.dart';
+import 'package:agent_remote/agent_remote_connector.dart';
 
 void main() {
   test('decodes git status and workspace tree', () {

@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hermes_remote/connection.dart';
+import 'package:agent_remote/connection.dart';
 
 void main() {
   const catalogJson = '''{"schemaVersion":1,"providers":[

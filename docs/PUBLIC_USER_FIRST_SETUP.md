@@ -67,9 +67,9 @@ Jika hasil kosong, perbaiki `PATH` Windows lalu buka PowerShell baru.
 
 ## 3. Jalankan Setup PC
 
-Double-click `AgentRemoteSetup.exe`. File ini harus satu folder dengan `ServerStart.exe` dan `ServerStop.exe`.
+Double-click `AgentRemoteSetup.exe`. File ini harus satu folder dengan `ServerStart.exe`, `ServerStop.exe`, dan `PetUsage.exe`.
 
-1. Tekan **Start Server**.
+1. Tekan **Start Remote Server** untuk mengaktifkan kontrol dari HP. Untuk mode PC biasa tanpa remote, tekan **Nyalakan PET + 9Router**.
 2. Tunggu status menjadi **Server aktif**.
 3. Biarkan QR tetap terbuka.
 4. Jangan screenshot atau membagikan QR; QR berisi token akses PC.

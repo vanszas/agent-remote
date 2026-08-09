@@ -89,6 +89,7 @@ Pada PC, siapkan dalam satu folder:
 - `AgentRemoteSetup.exe` untuk setup pertama dan QR pairing.
 - `ServerStart.exe` untuk menyalakan server Windows.
 - `ServerStop.exe` untuk menghentikan server dan process anaknya.
+- `PetUsage.exe` untuk indikator usage desktop yang otomatis menyala bersama server.
 - APK Agent Remote untuk Android.
 
 Jika repository ini dibangun sendiri, APK debug berada di `build\app\outputs\flutter-apk\app-debug.apk`. Pengguna file rilis dapat langsung memasang APK yang dibagikan tanpa ADB.
@@ -125,7 +126,7 @@ Jika command `tailscale` tidak ditemukan, buka aplikasi Tailscale Windows dari S
 
 ### 3. Jalankan setup PC dan scan QR
 
-Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe` dan `ServerStop.exe`. Tekan **Tambahkan ke Desktop + Start Menu** agar paket disalin ke `%LOCALAPPDATA%\AgentRemote\bin` dan shortcut tidak rusak saat folder download dipindah. Tekan **Start Server**, lalu buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC.
+Jalankan `AgentRemoteSetup.exe` dari folder yang sama dengan `ServerStart.exe`, `ServerStop.exe`, dan `PetUsage.exe`. Tekan **Tambahkan ke Desktop + Start Menu** agar paket disalin ke `%LOCALAPPDATA%\AgentRemote\bin` dan shortcut tidak rusak saat folder download dipindah. Pilih **Start Remote Server** untuk kontrol dari HP, atau **Nyalakan PET + 9Router** untuk mode PC biasa tanpa Agent Remote Server. Untuk mode remote, buka **Pengaturan > Scan QR Pairing** pada HP dan scan QR di PC.
 
 QR berisi token akses. Jangan screenshot atau membagikannya. Tailscale PC dan HP tetap harus login pada akun yang sama.
 
@@ -233,8 +234,6 @@ $env:AGENT_REMOTE_TOKEN = "ganti-dengan-token-panjang-dan-acak"
 $env:AGENT_REMOTE_HOST = "0.0.0.0"
 Start-Process .\ServerStart.exe -WindowStyle Hidden
 ```
-
-Nama environment legacy `HERMES_REMOTE_TOKEN` dan `HERMES_REMOTE_HOST` masih dibaca untuk kompatibilitas. Konfigurasi baru wajib memakai prefix `AGENT_REMOTE_`.
 
 Kontrol Tailscale aktif secara default. Untuk penggunaan LAN tanpa Tailscale:
 
@@ -393,7 +392,7 @@ Halaman **Pengaturan > Koneksi PC** menampilkan status PC, provider terpilih, ke
 
 Pemilih folder tampil langsung tanpa menunggu response PC selesai. Loading, kegagalan koneksi, tombol retry, pilihan disk, folder induk, pencarian lokal, dan folder aktif terakhir ditampilkan jelas. Pencarian hanya memfilter daftar yang sudah diterima sehingga tidak menambah request backend atau penggunaan token.
 
-Session disimpan per folder pada `.agent-remote\sessions.json`. Data lama dari `.hermes-remote\sessions.json` dimigrasikan bila ditemukan. Folder berbeda memiliki daftar session berbeda; session project A tidak dicampur dengan project B.
+Session disimpan per folder pada `.agent-remote\sessions.json`. Folder berbeda memiliki daftar session berbeda; session project A tidak dicampur dengan project B.
 
 Tab **File & Git** memperbarui perubahan file lokal setiap 10 detik selama halaman terlihat. Referensi remote di-fetch setiap 60 detik, saat halaman dibuka kembali, dan saat tombol refresh ditekan. Polling Git tidak memanggil model sehingga tidak memakai token AI.
 
@@ -485,7 +484,7 @@ Tab **File** menampilkan panel **Environment** dan dashboard Git responsif: juml
 - Source folder/file teratas dari workspace aktif.
 - Hasil fetch remote.
 
-Jika folder pilihan adalah folder induk, bukan root repository, Agent Remote mencari repository Git di bawahnya sampai kedalaman aman dan menampilkan daftar repository yang dapat dipilih. Contoh: memilih `C:\Kerjaan\Monokotil` akan menampilkan repository seperti `Apps\HermesRemote`, `Game\DontIn`, atau `Web\monokotil-next`, bukan menyatakan seluruh folder induk terhubung ke satu repository.
+Jika folder pilihan adalah folder induk, bukan root repository, Agent Remote mencari repository Git di bawahnya sampai kedalaman aman dan menampilkan daftar repository yang dapat dipilih. Contoh: memilih `C:\Kerjaan\Monokotil` akan menampilkan repository seperti `Apps\AgentRemote`, `Game\DontIn`, atau `Web\monokotil-next`, bukan menyatakan seluruh folder induk terhubung ke satu repository.
 
 Backend menggabungkan status file dan metadata repository menjadi satu scan, mencegah scan paralel untuk workspace sama, memakai cache singkat, serta hanya mengirim ringkasan session pada daftar project. Perpindahan folder tidak lagi membuka request Git ganda atau mengirim seluruh message/activity dari semua project.
 
@@ -545,19 +544,35 @@ adb install -r .\build\app\outputs\flutter-apk\app-debug.apk
 Instal PyInstaller dengan `uv`, build executable, lalu salin hasilnya ke root repository:
 
 ```powershell
-uv tool install pyinstaller
-pyinstaller --clean --noconfirm HermesRemoteServer.spec
+uv tool install --force --with qrcode --with pillow pyinstaller
+pyinstaller --clean --noconfirm AgentRemoteServer.spec
 pyinstaller --clean --noconfirm ServerStop.spec
+pyinstaller --clean --noconfirm PetUsage.spec
 Copy-Item .\dist\ServerStart.exe .\ServerStart.exe -Force
 Copy-Item .\dist\ServerStop.exe .\ServerStop.exe -Force
+Copy-Item .\dist\PetUsage.exe .\PetUsage.exe -Force
 ```
 
-Walau nama spec internal masih `HermesRemoteServer.spec`, executable dan branding pengguna adalah Agent Remote.
+### PetUsage Windows
+
+Build PetUsage ke folder distribusi lokal:
+
+```powershell
+pyinstaller --clean --noconfirm --distpath .\dist --workpath .\temp\pet-usage PetUsage.spec
+```
+
+Hasil:
+
+```text
+dist\PetUsage.exe
+```
+
+PET mengikuti lifecycle `ServerStart.exe`. Hilangkan centang **Nyalakan PET otomatis saat server start** pada setup, atau pakai `$env:AGENT_REMOTE_PET = "0"`, untuk menjalankan server tanpa PET.
 
 ### Test backend
 
 ```powershell
-uv run --with pytest pytest test/remote_server_test.py -q
+uv run --with pytest pytest test/remote_server_test.py test/pet_usage_test.py -q
 ```
 
 Build berhasil hanya membuktikan source dapat dikompilasi. Uji koneksi nyata, attachment, background service, session restore, dan agent reply pada HP sebelum membuat release.
@@ -654,6 +669,6 @@ Get-Process ServerStart -ErrorAction SilentlyContinue
 - Push cloud FCM belum dikonfigurasi. Notifikasi background saat ini memakai foreground service lokal dan koneksi ke PC.
 - Bridge Codex menyimpan endpoint loopback dan token server pada `%LOCALAPPDATA%\AgentRemote\bridge.json`; file hanya boleh diakses account Windows pengguna.
 - Managed cloud gateway belum tersedia. Koneksi utama masih langsung ke server lokal pengguna.
-- Nama package dan beberapa file internal masih memakai `hermes_remote` untuk backward compatibility. Branding UI dan produk adalah **Agent Remote**; tidak ada fallback Hermes saat agent lain dipilih.
+- Nama package dan beberapa file internal masih memakai `agent_remote` untuk backward compatibility. Branding UI dan produk adalah **Agent Remote**; tidak ada fallback Hermes saat agent lain dipilih.
 
 Untuk penggunaan harian: gunakan token kuat, Tailscale direct IP, mode permission paling rendah yang cukup, dan backup repository sebelum memberi agent akses tulis.

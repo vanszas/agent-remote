@@ -466,6 +466,17 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> retryLastPrompt() async {
+    final session = current;
+    if (session == null) return;
+    for (final message in session.messages.reversed) {
+      if (message.role == MessageRole.user && message.content.isNotEmpty) {
+        await send(message.content, attachments: message.attachments);
+        return;
+      }
+    }
+  }
+
   Future<void> stop() =>
       currentId == null ? Future.value() : connector.stopGeneration(currentId!);
   Future<void> stopSession(String id) => connector.stopGeneration(id);

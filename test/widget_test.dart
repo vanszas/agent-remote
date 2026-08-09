@@ -3,13 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hermes_remote/agent_connector.dart';
-import 'package:hermes_remote/app_controller.dart';
-import 'package:hermes_remote/connection.dart';
-import 'package:hermes_remote/hermes_remote_connector.dart';
-import 'package:hermes_remote/local_store.dart';
-import 'package:hermes_remote/main.dart' as app;
-import 'package:hermes_remote/models.dart';
+import 'package:agent_remote/agent_connector.dart';
+import 'package:agent_remote/app_controller.dart';
+import 'package:agent_remote/connection.dart';
+import 'package:agent_remote/agent_remote_connector.dart';
+import 'package:agent_remote/local_store.dart';
+import 'package:agent_remote/main.dart' as app;
+import 'package:agent_remote/models.dart';
 
 void main() {
   testWidgets('Material 3 demo shell renders', (tester) async {
@@ -451,8 +451,8 @@ void main() {
       ..gitRepository = const GitRepositoryStatus(
         nestedRepositories: [
           GitNestedRepository(
-            name: 'HermesRemote',
-            path: r'C:\Kerjaan\Monokotil\Apps\HermesRemote',
+            name: 'AgentRemote',
+            path: r'C:\Kerjaan\Monokotil\Apps\AgentRemote',
           ),
           GitNestedRepository(
             name: 'DontIn',
@@ -470,7 +470,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     expect(find.text('Folder induk memuat 2 Git repository'), findsOneWidget);
-    expect(find.text('HermesRemote'), findsOneWidget);
+    expect(find.text('AgentRemote'), findsOneWidget);
     expect(find.text('DontIn'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -649,6 +649,35 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('settings shows author watermark', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final catalog = ConnectionCatalog.parse(
+      '{"schemaVersion":1,"providers":[]}',
+    );
+    final connections = ConnectionSettingsController(
+      catalog,
+      ConnectionProfileStore(),
+    );
+    final controller = AppController(DemoAgentConnector(), _MemoryLocalStore());
+
+    await tester.pumpWidget(
+      MaterialApp(home: app.SettingsPage(controller, connections)),
+    );
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.textContaining('Author by vanszas'),
+      260,
+      scrollable: find.byType(Scrollable).last,
+    );
+
+    expect(find.textContaining('Author by vanszas'), findsOneWidget);
+    expect(
+      find.textContaining('https://monokotil-studio.biz.id/id/team/vanszas'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('security audit shows recent IP access without secrets', (
     tester,
   ) async {
@@ -692,7 +721,7 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(320, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final remote =
-        HermesRemoteConnector(Uri.parse('http://127.0.0.1:8899'), 'token')
+        AgentRemoteConnector(Uri.parse('http://127.0.0.1:8899'), 'token')
           ..availableAgents = const [
             RemoteAgentInfo(
               id: 'codex',
@@ -1130,7 +1159,7 @@ void main() {
   });
 }
 
-class _FakeFolderConnector extends HermesRemoteConnector {
+class _FakeFolderConnector extends AgentRemoteConnector {
   _FakeFolderConnector() : super(Uri.parse('http://127.0.0.1:8899'), 'token');
 
   @override

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'agent_connector.dart';
 import 'app_controller.dart';
 import 'local_store.dart';
@@ -14,7 +15,7 @@ import 'connection.dart';
 import 'clipboard_image.dart';
 import 'background_task_monitor.dart';
 import 'credential_store.dart';
-import 'hermes_remote_connector.dart';
+import 'agent_remote_connector.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -106,7 +107,7 @@ class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
     try {
       final credentials = await CredentialStore().load(profile.id);
       await controller.connect(
-        HermesRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
+        AgentRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
       );
       if (controller.isDemo) return;
       await controller.loadWorkspaces(
@@ -125,7 +126,7 @@ class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
   Widget build(BuildContext context) {
     final settings = connections;
     if (ready && settings != null) {
-      return HermesRemoteApp(controller: controller, connections: settings);
+      return AgentRemoteApp(controller: controller, connections: settings);
     }
     return MaterialApp(
       title: 'Agent Remote',
@@ -228,8 +229,8 @@ class _StartupLoadingScreen extends StatelessWidget {
   }
 }
 
-class HermesRemoteApp extends StatelessWidget {
-  const HermesRemoteApp({
+class AgentRemoteApp extends StatelessWidget {
+  const AgentRemoteApp({
     super.key,
     required this.controller,
     required this.connections,
@@ -698,7 +699,7 @@ class _HomeWorkspaceOverview extends StatelessWidget {
     final workspaceName = parts.isEmpty ? 'Semua folder PC' : parts.last;
     final statusColor = c.connected ? Colors.green.shade600 : colors.outline;
     final connector = c.connector;
-    final remote = connector is HermesRemoteConnector ? connector : null;
+    final remote = connector is AgentRemoteConnector ? connector : null;
     return Row(
       children: [
         Expanded(
@@ -873,7 +874,7 @@ class _HomeActiveTasksCard extends StatelessWidget {
 Future<void> showAgentSheet(
   BuildContext context,
   AppController app,
-  HermesRemoteConnector remote,
+  AgentRemoteConnector remote,
 ) => showModalBottomSheet<void>(
   context: context,
   isScrollControlled: true,
@@ -1243,7 +1244,7 @@ class _AgentSelectionCard extends StatelessWidget {
   }
 }
 
-void _setExecutionMode(HermesRemoteConnector remote, RemoteExecutionMode mode) {
+void _setExecutionMode(AgentRemoteConnector remote, RemoteExecutionMode mode) {
   remote.executionMode = mode;
   remote.concurrencyLimit = mode == RemoteExecutionMode.single
       ? 1
@@ -1269,10 +1270,7 @@ void _setExecutionMode(HermesRemoteConnector remote, RemoteExecutionMode mode) {
   }
 }
 
-void _toggleAgentSelection(
-  HermesRemoteConnector remote,
-  RemoteAgentInfo agent,
-) {
+void _toggleAgentSelection(AgentRemoteConnector remote, RemoteAgentInfo agent) {
   if (!agent.installed) return;
   if (remote.executionMode == RemoteExecutionMode.single) {
     remote.selectedAgentIds = {agent.id};
@@ -1323,7 +1321,7 @@ String _executionModeTokenNote(RemoteExecutionMode mode) => switch (mode) {
 Future<void> showFolderSheet(
   BuildContext context,
   AppController app,
-  HermesRemoteConnector remote,
+  AgentRemoteConnector remote,
 ) => showModalBottomSheet<void>(
   context: context,
   isScrollControlled: true,
@@ -1333,7 +1331,7 @@ Future<void> showFolderSheet(
 class _FolderPickerSheet extends StatefulWidget {
   const _FolderPickerSheet({required this.app, required this.remote});
   final AppController app;
-  final HermesRemoteConnector remote;
+  final AgentRemoteConnector remote;
 
   @override
   State<_FolderPickerSheet> createState() => _FolderPickerSheetState();
@@ -2381,6 +2379,11 @@ class _ChatScreenState extends State<ChatScreen> {
         .firstOrNull;
     final sessionTask = activeTask ?? sessionTasks.firstOrNull;
     final activeAgent = activeTask?.activeAgentState;
+    final personalizationMode = s.personalizationOverride == null
+        ? 'Personalization global'
+        : s.personalizationOverride!.isEmpty
+        ? 'Personalization nonaktif'
+        : 'Personalization session';
     final connectionSubtitle = c.isDemo
         ? 'Demo Mode • lokal'
         : activeAgent != null
@@ -2396,7 +2399,9 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             Text(s.title),
             Text(
-              connectionSubtitle,
+              c.supportsPersonalization
+                  ? '$connectionSubtitle | $personalizationMode'
+                  : connectionSubtitle,
               style: TextStyle(
                 fontSize: 12,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -2409,6 +2414,8 @@ class _ChatScreenState extends State<ChatScreen> {
             IconButton(
               tooltip: s.personalizationOverride == null
                   ? 'Personalization session: global'
+                  : s.personalizationOverride!.isEmpty
+                  ? 'Personalization session: nonaktif'
                   : 'Personalization session: custom',
               onPressed: () => showSessionPersonalization(context, c, s),
               icon: Icon(
@@ -3330,6 +3337,17 @@ class MessageCard extends StatelessWidget {
                     m.errorMessage!,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                if (!user &&
+                    m.status == MessageStatus.failed &&
+                    c.current?.status == SessionStatus.failed)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: c.retryLastPrompt,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Ulangi instruksi terakhir'),
                     ),
                   ),
                 if (m.status == MessageStatus.streaming)
@@ -7260,6 +7278,20 @@ Future<void> showSessionPersonalization(
   }
 }
 
+const _authorWebsite = 'https://monokotil-studio.biz.id/id/team/vanszas';
+
+Future<void> _openAuthorWebsite(BuildContext context) async {
+  final opened = await launchUrl(
+    Uri.parse(_authorWebsite),
+    mode: LaunchMode.externalApplication,
+  );
+  if (!opened && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Website author tidak dapat dibuka.')),
+    );
+  }
+}
+
 class SettingsPage extends StatelessWidget {
   const SettingsPage(this.c, this.connections, {super.key});
   final AppController c;
@@ -7399,7 +7431,7 @@ class SettingsPage extends StatelessWidget {
             _SecurityAuditCard(
               monitor,
               weakToken: switch (c.connector) {
-                final HermesRemoteConnector remote =>
+                final AgentRemoteConnector remote =>
                   remote.token.trim().length < 16 || remote.token == 'admin',
                 _ => false,
               },
@@ -7410,11 +7442,17 @@ class SettingsPage extends StatelessWidget {
             icon: Icons.info_outline,
             title: 'Tentang',
           ),
-          const Card(
+          Card(
             child: ListTile(
-              leading: Icon(Icons.smart_toy_outlined),
-              title: Text('Agent Remote 0.4.4'),
-              subtitle: Text('Remote controller untuk multi-agent di PC'),
+              leading: const Icon(Icons.smart_toy_outlined),
+              title: const Text('Agent Remote 0.5.0'),
+              subtitle: const Text(
+                'Author by vanszas · Monokotil Studio\n'
+                'https://monokotil-studio.biz.id/id/team/vanszas',
+              ),
+              isThreeLine: true,
+              trailing: const Icon(Icons.open_in_new_rounded),
+              onTap: () => _openAuthorWebsite(context),
             ),
           ),
         ],
@@ -8200,7 +8238,7 @@ Future<void> connectGateway(
                     GatewayCredentials(username.text.trim(), password.text),
                   );
                   await app.connect(
-                    HermesRemoteConnector(Uri.parse(endpoint), password.text),
+                    AgentRemoteConnector(Uri.parse(endpoint), password.text),
                   );
                   if (!app.isDemo) {
                     await app.loadWorkspaces(
@@ -8268,7 +8306,7 @@ Future<void> scanPairingQr(
       GatewayCredentials('admin', pairing.token),
     );
     await app.connect(
-      HermesRemoteConnector(Uri.parse(pairing.endpoint), pairing.token),
+      AgentRemoteConnector(Uri.parse(pairing.endpoint), pairing.token),
     );
     if (!app.isDemo) await app.loadWorkspaces(null);
     if (!context.mounted) return;

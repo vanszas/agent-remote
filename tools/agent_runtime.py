@@ -254,6 +254,7 @@ class SessionStore:
             "activeModelName",
             "status",
             "preview",
+            "personalizationOverride",
         )
         with self.lock:
             values = sorted(

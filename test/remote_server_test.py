@@ -6,13 +6,135 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-MODULE = Path(__file__).parents[1] / "tools" / "hermes_remote_server.py"
+MODULE = Path(__file__).parents[1] / "tools" / "agent_remote_server.py"
 spec = importlib.util.spec_from_file_location("remote_server", MODULE)
 remote_server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(remote_server)
+
+
+def test_antigravity_quota_parses_official_remaining_fraction(monkeypatch):
+    remote_server.NINE_ROUTER_QUOTA_CACHE.clear()
+
+    class Response:
+        def read(self):
+            return json.dumps({
+                "models": {
+                    "tab_flash_lite_preview": {
+                        "displayName": "Preview", "quotaInfo": {"remainingFraction": 1.0},
+                    },
+                    "gemini-3.6-flash-high": {
+                        "displayName": "Gemini 3.6 Flash (High)",
+                        "quotaInfo": {"remainingFraction": 0.73, "resetTime": "2026-08-06T07:31:00Z"},
+                    }
+                }
+            }).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(remote_server.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    quota = remote_server._antigravity_quota("gemini", {"accessToken": "test", "projectId": "project"})
+    assert quota["quotas"] == [{
+        "id": "gemini-3.6-flash-high", "label": "Gemini 3.6 Flash (High)",
+        "used_percent": 27.0, "remaining_percent": 73.0, "reset_at": "2026-08-06T07:31:00Z",
+    }]
+
+
+def test_provider_usage_marks_recent_history_active_without_live_cli(monkeypatch, tmp_path):
+    db_path = tmp_path / "usage.sqlite"
+    request_time = datetime.now(timezone.utc)
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE usageHistory (timestamp TEXT, provider TEXT, model TEXT, connectionId TEXT, endpoint TEXT, promptTokens INTEGER, completionTokens INTEGER, cost REAL, status TEXT, tokens TEXT)")
+    connection.execute("INSERT INTO usageHistory VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+        request_time.isoformat(), "codex", "gpt-test", "connection", "/v1", 1, 1, 0, "ok", "{}",
+    ))
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(remote_server, "list_pc_agent_tasks", lambda: [])
+    monkeypatch.setattr(remote_server, "nine_router_quota_accounts", lambda _path: [])
+    recent = remote_server.provider_usage(
+        db_path=db_path,
+        now=request_time + timedelta(seconds=1),
+    )
+    assert recent["active"]["is_active"] is True
+    assert recent["active"]["activity_source"] == "recent_request"
+    stale = remote_server.provider_usage(
+        db_path=db_path,
+        now=request_time + timedelta(seconds=remote_server.ACTIVITY_WINDOW_SECONDS + 1),
+    )
+    assert stale["active"]["is_active"] is False
+    monkeypatch.setattr(remote_server, "list_pc_agent_tasks", lambda: [{"status": "running", "activeAgent": "gemini"}])
+    live = remote_server.provider_usage(
+        db_path=db_path,
+        now=request_time + timedelta(seconds=remote_server.ACTIVITY_WINDOW_SECONDS + 1),
+    )
+    assert live["active"]["is_active"] is False
+    assert live["active"]["activity_source"] == "idle"
+    assert live["active"]["has_live_process"] is True
+
+
+def test_provider_usage_fast_path_skips_quota_fetch(monkeypatch, tmp_path):
+    db_path = tmp_path / "usage.sqlite"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE usageHistory (timestamp TEXT, provider TEXT, model TEXT, connectionId TEXT, endpoint TEXT, promptTokens INTEGER, completionTokens INTEGER, cost REAL, status TEXT, tokens TEXT)")
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(remote_server, "nine_router_quota_accounts", lambda _path: (_ for _ in ()).throw(AssertionError("quota fetch called")))
+    snapshot = remote_server.provider_usage(db_path=db_path, include_quotas=False)
+    assert snapshot["quota_complete"] is False
+    assert snapshot["quota_accounts"] == []
+
+def test_provider_usage_keeps_active_connection_without_quota_snapshot(monkeypatch, tmp_path):
+    db_path = tmp_path / "usage.sqlite"
+    request_time = datetime.now(timezone.utc)
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE usageHistory (
+            timestamp TEXT, provider TEXT, model TEXT, connectionId TEXT,
+            endpoint TEXT, promptTokens INTEGER, completionTokens INTEGER,
+            cost REAL, status TEXT, tokens TEXT
+        );
+        CREATE TABLE providerConnections (
+            id TEXT, provider TEXT, name TEXT, email TEXT, data TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO providerConnections VALUES (?, ?, ?, ?, ?)",
+        ("codex-account", "codex", "codex@example.com", "codex@example.com", json.dumps({
+            "lastUsedAt": request_time.isoformat(),
+            "defaultModel": "gpt-test",
+        })),
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(remote_server, "list_pc_agent_tasks", lambda: [])
+    monkeypatch.setattr(remote_server, "nine_router_quota_accounts", lambda _path: (_ for _ in ()).throw(AssertionError("quota fetch called")))
+
+    snapshot = remote_server.provider_usage(
+        db_path=db_path,
+        now=request_time + timedelta(seconds=1),
+        include_quotas=False,
+    )
+
+    assert snapshot["active"]["is_active"] is True
+    assert snapshot["active"]["activity_source"] == "connection_last_used"
+    assert snapshot["active_usages"] == [{
+        "provider": "codex",
+        "model": "gpt-test",
+        "account": "codex@example.com",
+        "connection_id": "codex-account",
+        "timestamp": request_time.isoformat(),
+        "source": "connection_last_used",
+        "is_active": True,
+    }]
 
 
 def test_parse_git_status_maps_core_states():
@@ -1211,3 +1333,67 @@ def test_session_store_persists_personalization_override(tmp_path):
         tmp_path / "sessions.json", "demo"
     ).get(session["id"])
     assert restored["personalizationOverride"] == "Keep answers short"
+
+    # Test summary serialization holds it
+    summary = remote_server.SessionStore(
+        tmp_path / "sessions.json", "demo"
+    ).list_summaries()[0]
+    assert summary["personalizationOverride"] == "Keep answers short"
+
+
+def test_runtime_forwards_personalization_to_agent(monkeypatch, tmp_path):
+    store = remote_server.SessionStore(tmp_path / "sessions.json", "demo")
+    session = store.create()
+    runtime = remote_server.AgentRuntime(store, lambda *_: [], tmp_path)
+    received = []
+
+    def fake_run(_run_id, _session_id, _agent_id, text, *_args, **_kwargs):
+        received.append(text)
+        return "ok"
+
+    monkeypatch.setattr(runtime, "_run_agent", fake_run)
+    personalized = remote_server.personalized_prompt(
+        "Fix bug", "Jawab Indonesia", None
+    )
+    runtime.execute(
+        session["id"],
+        "Fix bug",
+        "",
+        ["codex"],
+        "single",
+        "codex",
+        [],
+        "workspace",
+        queue.Queue(),
+        agent_text=personalized,
+    )
+
+    assert received == [personalized]
+
+
+def test_pet_autostart_respects_setting_and_override(monkeypatch, tmp_path):
+    state_file = tmp_path / "pet-usage.json"
+    monkeypatch.setattr(remote_server, "PET_STATE_FILE", state_file)
+    monkeypatch.delenv("AGENT_REMOTE_PET", raising=False)
+
+    assert remote_server.pet_autostart_enabled() is True
+    state_file.write_text('{"start_with_server": false}', encoding="utf-8")
+    assert remote_server.pet_autostart_enabled() is False
+
+    monkeypatch.setenv("AGENT_REMOTE_PET", "1")
+    assert remote_server.pet_autostart_enabled() is True
+
+def test_pet_running_reports_child_process_state(monkeypatch):
+    class Process:
+        def __init__(self, code):
+            self.code = code
+
+        def poll(self):
+            return self.code
+
+    monkeypatch.setattr(remote_server, "PET_PROCESS", Process(None))
+    assert remote_server.pet_running() is True
+    monkeypatch.setattr(remote_server, "PET_PROCESS", Process(1))
+    assert remote_server.pet_running() is False
+    monkeypatch.setattr(remote_server, "PET_PROCESS", None)
+    assert remote_server.pet_running() is False

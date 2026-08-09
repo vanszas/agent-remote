@@ -1,10 +1,10 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hermes_remote/agent_connector.dart';
-import 'package:hermes_remote/app_controller.dart';
-import 'package:hermes_remote/local_store.dart';
-import 'package:hermes_remote/models.dart';
+import 'package:agent_remote/agent_connector.dart';
+import 'package:agent_remote/app_controller.dart';
+import 'package:agent_remote/local_store.dart';
+import 'package:agent_remote/models.dart';
 
 void main() {
   test('session serialization tolerates unknown fields and enum fallback', () {

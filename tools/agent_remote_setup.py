@@ -18,14 +18,15 @@ from tkinter import messagebox, simpledialog, ttk
 from tailscale_control import find_tailscale
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-SETUP_VERSION = "0.4.4"
+SETUP_VERSION = "0.5.0"
 SHORTCUT_BUTTON_TEXT = "Tambahkan ke Desktop + Start Menu"
 PORT = 9120
 STATE_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AgentRemote"
 TOKEN_FILE = STATE_ROOT / "server-token.txt"
+PET_STATE_FILE = STATE_ROOT / "pet-usage.json"
 INSTALL_ROOT = STATE_ROOT / "bin"
 ACTIVE_STATUSES = {"queued", "running", "generating"}
-PACKAGE_FILES = ("AgentRemoteSetup.exe", "ServerStart.exe", "ServerStop.exe")
+PACKAGE_FILES = ("AgentRemoteSetup.exe", "ServerStart.exe", "ServerStop.exe", "PetUsage.exe")
 
 
 def launcher_dir() -> Path:
@@ -45,6 +46,26 @@ def read_or_create_token() -> str:
     write_token(token)
     return token
 
+
+def pet_autostart_enabled() -> bool:
+    try:
+        value = json.loads(PET_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return True
+    return value.get("start_with_server", True) is not False if isinstance(value, dict) else True
+
+def set_pet_autostart(enabled: bool) -> None:
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        value = json.loads(PET_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    value["start_with_server"] = bool(enabled)
+    temporary = PET_STATE_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(PET_STATE_FILE)
 
 def write_token(token: str) -> None:
     if len(token.strip()) < 16:
@@ -73,6 +94,28 @@ def run_hidden(command: list[str], *, wait: bool = False):
     )
 
 
+def nine_router_executable() -> Path | None:
+    for command in ("9router.cmd", "9router"):
+        resolved = shutil.which(command)
+        if resolved:
+            return Path(resolved).resolve()
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        fallback = Path(appdata) / "npm" / "9router.cmd"
+        if fallback.is_file():
+            return fallback.resolve()
+    return None
+
+def nine_router_command() -> list[str]:
+    executable = nine_router_executable()
+    if executable is None:
+        raise RuntimeError(
+            "9Router tidak ditemukan. Pastikan perintah 9router tersedia di PATH."
+        )
+    arguments = ["--no-browser", "--skip-update", "--tray"]
+    if executable.suffix.lower() in {".cmd", ".bat"}:
+        return ["cmd.exe", "/d", "/c", str(executable), *arguments]
+    return [str(executable), *arguments]
 def install_binaries() -> Path:
     source_root = launcher_dir()
     missing = [name for name in PACKAGE_FILES if not (source_root / name).is_file()]
@@ -215,19 +258,39 @@ class SetupApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"Agent Remote Setup {SETUP_VERSION}")
-        self.root.geometry("560x720")
-        self.root.minsize(520, 650)
+        self.root.geometry("600x760")
+        self.root.minsize(540, 620)
         self.token = read_or_create_token()
         self.endpoint = "Mencari koneksi..."
         self.qr_photo = None
         self.status = tk.StringVar(value="Memuat status...")
         self.endpoint_text = tk.StringVar(value=self.endpoint)
+        self.pet_autostart = tk.BooleanVar(value=pet_autostart_enabled())
         self._build()
         self._refresh_async()
 
     def _build(self) -> None:
-        frame = ttk.Frame(self.root, padding=22)
-        frame.pack(fill="both", expand=True)
+        viewport = ttk.Frame(self.root)
+        viewport.pack(fill="both", expand=True)
+        canvas = tk.Canvas(viewport, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = ttk.Frame(canvas, padding=22)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window, width=event.width),
+        )
+        self.root.bind(
+            "<MouseWheel>",
+            lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"),
+        )
         ttk.Label(
             frame,
             text=f"Agent Remote Setup {SETUP_VERSION}",
@@ -243,17 +306,37 @@ class SetupApp:
         self._row(info, "Endpoint", self.endpoint_text)
         self._row(info, "Status", self.status)
 
-        controls = ttk.Frame(frame)
+        controls = ttk.LabelFrame(frame, text="Mode Remote / HP", padding=8)
         controls.pack(fill="x", pady=14)
-        ttk.Button(controls, text="Start Server", command=self.start_server).pack(
+        ttk.Button(controls, text="Start Remote Server", command=self.start_server).pack(
             side="left", expand=True, fill="x", padx=(0, 5)
         )
-        ttk.Button(controls, text="Stop Server", command=self.stop_server).pack(
+        ttk.Button(controls, text="Stop Remote Server", command=self.stop_server).pack(
             side="left", expand=True, fill="x", padx=5
         )
         ttk.Button(controls, text="Test", command=self.test_connection).pack(
             side="left", expand=True, fill="x", padx=(5, 0)
         )
+
+        pc_controls = ttk.LabelFrame(frame, text="Mode PC biasa", padding=8)
+        pc_controls.pack(fill="x", pady=(0, 14))
+        ttk.Button(
+            pc_controls,
+            text="Nyalakan PET + 9Router",
+            command=self.start_pc_mode,
+        ).pack(fill="x")
+        ttk.Label(
+            pc_controls,
+            text="Tidak menyalakan Agent Remote Server. 9Router berjalan di tray.",
+            wraplength=460,
+        ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Checkbutton(
+            frame,
+            text="Nyalakan PET otomatis saat server start",
+            variable=self.pet_autostart,
+            command=self._save_pet_autostart,
+        ).pack(anchor="w", pady=(0, 10))
 
         ttk.Button(
             frame,
@@ -324,8 +407,16 @@ class SetupApp:
     def _refresh_data(self) -> tuple[str, str, object]:
         endpoint = connection_endpoint()
         try:
-            api_json("/api/status", self.token)
-            status = "Server aktif"
+            server = api_json("/api/status", self.token)
+            pet = server.get("pet", {})
+            if pet.get("running"):
+                status = "Server aktif | PET aktif"
+            elif pet.get("auto_start") and pet.get("available"):
+                status = "Server aktif | PET gagal start"
+            elif pet.get("auto_start"):
+                status = "Server aktif | PET belum terpasang"
+            else:
+                status = "Server aktif | PET nonaktif"
         except urllib.error.HTTPError as error:
             status = (
                 "Server aktif, password berbeda"
@@ -347,6 +438,18 @@ class SetupApp:
         self.status.set(status)
         self.qr_label.configure(image=self.qr_photo)
 
+    def _save_pet_autostart(self) -> None:
+        try:
+            set_pet_autostart(self.pet_autostart.get())
+            self.status.set(
+                "PET aktif saat server start"
+                if self.pet_autostart.get()
+                else "PET tidak otomatis dinyalakan"
+            )
+        except OSError as error:
+            self.pet_autostart.set(not self.pet_autostart.get())
+            messagebox.showerror("Agent Remote", f"Pengaturan PET gagal disimpan: {error}")
+
     def start_server(self) -> None:
         executable = launcher_dir() / "ServerStart.exe"
         if not executable.is_file():
@@ -357,6 +460,22 @@ class SetupApp:
         run_hidden([str(executable)])
         self.status.set("Server sedang dimulai...")
         self.root.after(2500, self._refresh_async)
+
+    def start_pc_mode(self) -> None:
+        self.status.set("Menyalakan PET + 9Router...")
+        self._background(
+            self._start_pc_mode,
+            lambda status: self.status.set(status),
+        )
+
+    @staticmethod
+    def _start_pc_mode() -> str:
+        pet = launcher_dir() / "PetUsage.exe"
+        if not pet.is_file():
+            raise RuntimeError("PetUsage.exe tidak ditemukan di folder yang sama.")
+        run_hidden(nine_router_command())
+        run_hidden([str(pet)])
+        return "Mode PC aktif | PET + 9Router berjalan"
 
     def stop_server(self) -> None:
         executable = launcher_dir() / "ServerStop.exe"
@@ -475,6 +594,7 @@ def self_check() -> None:
         Path("C:/AgentRemote/AgentRemoteSetup.exe")
     )
     assert SETUP_VERSION and "Desktop" in SHORTCUT_BUTTON_TEXT
+    assert "PetUsage.exe" in PACKAGE_FILES
 
 
 def main() -> int:

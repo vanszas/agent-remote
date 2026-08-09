@@ -1,0 +1,2 @@
+qrcode>=8.2,<9
+Pillow>=10

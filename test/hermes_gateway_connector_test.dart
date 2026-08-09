@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hermes_remote/hermes_gateway_connector.dart';
+import 'package:agent_remote/hermes_gateway_connector.dart';
 
 void main() {
   test('gateway URLs normalize protocol and preserve reverse-proxy prefix', () {

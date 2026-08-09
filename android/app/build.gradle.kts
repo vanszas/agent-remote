@@ -12,7 +12,7 @@ if (signingPropertiesFile.isFile) {
 }
 
 android {
-    namespace = "com.monokotil.hermesremote"
+    namespace = "com.monokotil.agentremote"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -22,7 +22,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.monokotil.hermesremote"
+        applicationId = "com.monokotil.agentremote"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

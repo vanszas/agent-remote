@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -63,6 +63,18 @@ def test_quota_accounts_groups_rows_under_each_account():
     assert [(account["name"], len(account["rows"])) for account in accounts] == [("Gemini", 2)]
 
 
+def test_snapshot_refresh_always_recomputes_overlay_geometry():
+    import inspect
+    source = inspect.getsource(UsagePet._accept_snapshot)
+    assert "self._apply_overlay_geometry()" in source
+    assert "previous_rows != new_rows" not in source
+
+def test_pet_reasserts_topmost_without_focus_activation():
+    import inspect
+    source = inspect.getsource(UsagePet._keep_topmost)
+    assert "SetWindowPos" in source
+    assert "0x0001 | 0x0002 | 0x0010" in source
+
 def test_panel_uses_fixed_footer_scroll_and_resize_contract():
     import inspect
     source = inspect.getsource(UsagePet._render)
@@ -82,7 +94,7 @@ def test_active_usage_rows_carries_recent_model_name():
     assert rows[0]["connection_id"] == "ag"
 
 
-def test_active_quota_rows_uses_current_consumption_not_enabled_account():
+def test_active_quota_rows_only_uses_current_consumption():
     snapshot = {
         "recent": [{"provider": "codex", "model": "gpt-live", "connection_id": "live", "timestamp": "2026-08-06T03:15:10Z"}],
         "quota_accounts": [
@@ -91,24 +103,25 @@ def test_active_quota_rows_uses_current_consumption_not_enabled_account():
         ],
     }
     snapshot["recent"][0]["timestamp"] = datetime.now(timezone.utc).isoformat()
-    assert [(row["account"], row["label"]) for row in active_quota_rows(snapshot)] == [
-        ("Live", "Sesi"),
-        ("Spent", "Sesi"),
-    ]
+    assert [(row["account"], row["label"]) for row in active_quota_rows(snapshot)] == [("Live", "Sesi")]
 
-def test_active_usage_rows_adds_non_codex_quota_fallback():
+def test_active_usage_rows_collapses_idle_quota_accounts():
     rows = active_usage_rows({
-        "active_usages": [{"provider": "codex", "connection_id": "codex", "model": "gpt", "account": "Codex"}],
+        "active_usages": [{"provider": "codex", "connection_id": "codex", "model": "gpt", "account": "Codex", "timestamp": datetime.now(timezone.utc).isoformat()}],
         "quota_accounts": [
             {"id": "codex", "provider": "codex", "name": "Codex", "model": "gpt", "quotas": [{"remaining_percent": 19}]},
             {"id": "ag", "provider": "antigravity", "name": "Gemini", "model": "gemini", "quotas": [{"label": "Pro", "remaining_percent": 87.9}]},
-            {"id": "error", "provider": "antigravity", "name": "Error", "quotas": []},
         ],
     })
-    assert [(row["provider"], row["account"], row["remaining"]) for row in rows] == [
-        ("codex", "Codex", 19.0),
-        ("antigravity", "Gemini", 87.9),
-    ]
+    assert [(row["provider"], row["account"], row["remaining"]) for row in rows] == [("codex", "Codex", 19.0)]
+
+def test_active_usage_rows_collapses_stale_active_signal():
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=9)).isoformat()
+    rows = active_usage_rows({
+        "active_usages": [{"provider": "codex", "connection_id": "codex", "timestamp": stale, "is_active": True}],
+        "quota_accounts": [{"id": "codex", "provider": "codex", "quotas": [{"remaining_percent": 50}]}],
+    })
+    assert rows == []
 
 def test_quota_bar_color_thresholds():
     assert quota_bar_color(None) == ACCENT
@@ -124,7 +137,7 @@ def test_quota_bar_color_thresholds():
 
 def test_working_animation_selects_working_sprite_state():
     pet = UsagePet.__new__(UsagePet)
-    pet.snapshot = {"active_usages": [{"provider": "codex", "is_active": True}]}
+    pet.snapshot = {"active_usages": [{"provider": "codex", "is_active": True, "timestamp": datetime.now(timezone.utc).isoformat()}]}
     pet.roaming = False
     pet.direction = 1
     assert pet._animation_state() == "working"
@@ -157,7 +170,7 @@ def test_used_pet_asset_rows_never_return_blank_animation_frames():
         assert all(frame.getchannel("A").getbbox() for frame in sprite_row_frames(sheet, row))
 
 
-def test_active_usage_rows_keeps_real_quota_fallback_and_unmapped_recent():
+def test_active_usage_rows_keeps_only_recent_mapped_and_unmapped_accounts():
     snapshot = {
         "recent": [
             {"provider": "codex", "model": "gpt-live", "connection_id": "live", "timestamp": "2026-08-06T03:15:10Z"},
@@ -174,7 +187,6 @@ def test_active_usage_rows_keeps_real_quota_fallback_and_unmapped_recent():
     assert [(row["provider"], row["account"], row["remaining"]) for row in active_usage_rows(snapshot)] == [
         ("codex", "live", 52.0),
         ("antigravity", "gemini", None),
-        ("codex", "spent", 0.0),
     ]
     assert provider_badge("codex") == "CODEX"
     assert provider_badge("antigravity") == "AG"
@@ -250,6 +262,7 @@ def test_visible_bar_rows_caps_overlay_height():
                 "model": f"gpt-{index}",
                 "account": f"account-{index}",
                 "connection_id": f"connection-{index}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             for index in range(BAR_MAX_ROWS + 1)
         ],

@@ -6,7 +6,7 @@ import math
 import os
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from time import monotonic
 from pathlib import Path
 from tkinter import Canvas, Scrollbar, Tk, Toplevel, simpledialog
@@ -18,6 +18,7 @@ from agent_remote_server import provider_usage
 PET_USAGE_VERSION = "0.20.0"
 REFRESH_MS = 60_000
 ACTIVITY_MS = 3_000
+ACTIVE_USAGE_SECONDS = 8
 LOOP_MS = 1100
 FRAME_COUNT = 8
 FRAME_MS = LOOP_MS // FRAME_COUNT
@@ -292,10 +293,11 @@ def provider_badge(provider: object) -> str:
     return {"codex": "CODEX", "antigravity": "AG", "gemini": "GEMINI", "ollama": "OLLAMA"}.get(str(provider).lower(), "?")
 
 
-def _recently_used(entry: dict, now: datetime) -> bool:
+def _recently_used(entry: dict, now: datetime, seconds: int = 120) -> bool:
     try:
         timestamp = datetime.fromisoformat(str(entry.get("timestamp", "")).replace("Z", "+00:00"))
-        return now - timestamp.astimezone(timezone.utc) <= timedelta(minutes=2)
+        age = (now - timestamp.astimezone(timezone.utc)).total_seconds()
+        return 0 <= age <= seconds
     except ValueError:
         return False
 
@@ -306,8 +308,15 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
         for account in snapshot.get("quota_accounts") or []
     }
     candidates = snapshot.get("active_usages")
-    if not isinstance(candidates, list):
-        now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if isinstance(candidates, list):
+        candidates = [
+            entry for entry in candidates
+            if isinstance(entry, dict)
+            and entry.get("is_active") is not False
+            and _recently_used(entry, now, ACTIVE_USAGE_SECONDS)
+        ]
+    else:
         candidates = [
             entry for entry in snapshot.get("recent") or []
             if _recently_used(entry, now)
@@ -341,30 +350,6 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
             "model": model,
             "connection_id": connection_id,
             "label": quota.get("label") if quota else str(entry.get("label") or "USAGE"),
-            "remaining": remaining,
-        })
-    for connection_id, account in accounts.items():
-        quota = next((value for value in account.get("quotas") or [] if isinstance(value, dict)), None)
-        if not quota:
-            continue
-        remaining = _percentage(quota.get("remaining_percent"))
-        if remaining is None:
-            continue
-        provider = str(account.get("provider") or "unknown")
-        account_name = str(account.get("name") or provider)
-        model = str(account.get("model") or "model tidak terdeteksi")
-        key = (connection_id or provider, model, account_name)
-        if (connection_id and connection_id in seen_connections) or key in seen:
-            continue
-        if connection_id:
-            seen_connections.add(connection_id)
-        seen.add(key)
-        rows.append({
-            "provider": provider,
-            "account": account_name,
-            "model": model,
-            "connection_id": connection_id,
-            "label": quota.get("label") or "QUOTA",
             "remaining": remaining,
         })
     return rows
@@ -453,6 +438,20 @@ class UsagePet:
         self.root.after(FRAME_MS, self._animate)
         self.root.after(50, self._refresh)
         self.root.after(ACTIVITY_MS, self._activity_refresh)
+        self.root.after(250, self._keep_topmost)
+
+    def _keep_topmost(self) -> None:
+        if not self.root.winfo_exists():
+            return
+        self.root.attributes("-topmost", True)
+        if os.name == "nt":
+            ctypes.windll.user32.SetWindowPos(
+                self.root.winfo_id(), -1, 0, 0, 0, 0,
+                0x0001 | 0x0002 | 0x0010,
+            )
+        else:
+            self.root.lift()
+        self.root.after(1000, self._keep_topmost)
 
     def _virtual_bounds(self) -> tuple[int, int, int, int]:
         if not hasattr(self, "root") or self.root is None:
@@ -849,7 +848,6 @@ class UsagePet:
         )
 
     def _accept_snapshot(self, snapshot: dict, kind: str = "quota", request_id: int = 0) -> None:
-        previous_rows = len(visible_bar_rows(self.snapshot)[0])
         previous_state = self._animation_state()
         if kind == "activity":
             if request_id != self._activity_request_id:
@@ -895,11 +893,9 @@ class UsagePet:
                     )
                     if key in snapshot
                 })
-        new_rows = len(visible_bar_rows(self.snapshot)[0])
         if self._animation_state() != previous_state:
             self._sync_animation_state()
-        if previous_rows != new_rows:
-            self._apply_overlay_geometry()
+        self._apply_overlay_geometry()
         self._paint_bar()
         if self.panel and self.panel.winfo_exists() and self.panel.state() == "normal":
             self._render()

@@ -40,6 +40,8 @@ WHITE = "#ffffff"
 HOT = "#ff8f86"
 GOOD = "#72e0a2"
 ACCENT = "#7dd3fc"
+YELLOW = "#facc15"
+ORANGE = "#f97316"
 WARNING = "#f6c177"
 SURFACE = "#111f35"
 SURFACE_ELEVATED = "#172943"
@@ -312,6 +314,7 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
         ]
     rows = []
     seen: set[tuple[str, str, str]] = set()
+    seen_connections: set[str] = set()
     for entry in candidates:
         if not isinstance(entry, dict):
             continue
@@ -321,8 +324,10 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
         account_name = str(entry.get("account") or account.get("name") or provider)
         model = str(entry.get("model") or account.get("model") or "model tidak terdeteksi")
         key = (connection_id or provider, model, account_name)
-        if key in seen:
+        if (connection_id and connection_id in seen_connections) or key in seen:
             continue
+        if connection_id:
+            seen_connections.add(connection_id)
         seen.add(key)
         quota = next((value for value in account.get("quotas") or [] if isinstance(value, dict)), None)
         raw_remaining = quota.get("remaining_percent") if quota else None
@@ -338,7 +343,42 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
             "label": quota.get("label") if quota else str(entry.get("label") or "USAGE"),
             "remaining": remaining,
         })
+    for connection_id, account in accounts.items():
+        quota = next((value for value in account.get("quotas") or [] if isinstance(value, dict)), None)
+        if not quota:
+            continue
+        remaining = _percentage(quota.get("remaining_percent"))
+        if remaining is None:
+            continue
+        provider = str(account.get("provider") or "unknown")
+        account_name = str(account.get("name") or provider)
+        model = str(account.get("model") or "model tidak terdeteksi")
+        key = (connection_id or provider, model, account_name)
+        if (connection_id and connection_id in seen_connections) or key in seen:
+            continue
+        if connection_id:
+            seen_connections.add(connection_id)
+        seen.add(key)
+        rows.append({
+            "provider": provider,
+            "account": account_name,
+            "model": model,
+            "connection_id": connection_id,
+            "label": quota.get("label") or "QUOTA",
+            "remaining": remaining,
+        })
     return rows
+
+def quota_bar_color(remaining: float | None) -> str:
+    if remaining is None:
+        return ACCENT
+    if remaining >= 80:
+        return GOOD
+    if remaining >= 50:
+        return ORANGE
+    if remaining > 30:
+        return YELLOW
+    return HOT
 
 
 def visible_bar_rows(snapshot: dict) -> tuple[list[dict], int]:
@@ -401,6 +441,7 @@ class UsagePet:
         self._load_frames()
         self.canvas = Canvas(self.root, width=BAR_W, height=self.pet_h + BAR_H, bg=TRANSPARENT, highlightthickness=0)
         self.canvas.pack()
+        self.root.update_idletasks()
         self.sprite = self.canvas.create_image(BAR_W // 2, BAR_H + self.pet_h // 2, tags="pet")
         self._paint_sprite()
         self._paint_bar()
@@ -424,10 +465,17 @@ class UsagePet:
         bounds = self._virtual_bounds()
         x = int(state.get("x", bounds[2] - BAR_W - 28))
         y = int(state.get("y", bounds[3] - self.pet_h - BAR_H - 52))
+        primary_bounds = (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        if x + BAR_W <= 0 or x >= primary_bounds[2] or y + self.pet_h + BAR_H <= 0 or y >= primary_bounds[3]:
+            x = primary_bounds[2] - BAR_W - 28
+            y = primary_bounds[3] - self.pet_h - BAR_H - 52
+            bounds = primary_bounds
         x, y = clamp_window_position(x, y, BAR_W, self.pet_h + BAR_H, bounds)
         self.root.geometry(f"+{x}+{y}")
+        self.root.update_idletasks()
 
     def _apply_overlay_geometry(self, pet_bottom: int | None = None) -> None:
+        self.root.update_idletasks()
         rows, _overflow = visible_bar_rows(self.snapshot)
         offset = bar_height_for(len(rows)) if self.bar_visible and rows else 0
         old_offset = self._overlay_offset
@@ -571,8 +619,8 @@ class UsagePet:
             row_tag = f"usage-row-{index}"
             y = 30 + index * BAR_ROW_H
             remaining = row["remaining"]
-            color = GOOD if remaining is None else (HOT if remaining <= 20 else GOOD)
-            value = "LIVE" if remaining is None else f"{remaining:.0f}%"
+            color = quota_bar_color(remaining)
+            value = "DATA" if remaining is None else f"{remaining:.0f}%"
             background = self.canvas.create_rectangle(8, y, BAR_W - 8, y + 32, fill=HUD_ROW, outline="", tags=(tag, row_tag))
             badge = provider_badge(row["provider"])
             self.canvas.create_rectangle(14, y + 6, 62, y + 26, fill="#153e5d", outline=HUD_EDGE, tags=(tag, row_tag))
@@ -973,7 +1021,7 @@ class UsagePet:
                 card_bottom = y + 96
                 remaining = row.get("remaining")
                 known = remaining is not None
-                color = HOT if known and remaining <= 20 else GOOD if known else WARNING
+                color = quota_bar_color(remaining)
                 quota_right = right - 20
                 quota_width = quota_right - 52
                 c.create_rectangle(36, card_top, quota_right, card_bottom, fill=SURFACE, outline=TRACK)
@@ -1097,8 +1145,11 @@ class UsagePet:
 
 def acquire_instance() -> bool:
     global MUTEX_HANDLE
-    MUTEX_HANDLE = ctypes.windll.kernel32.CreateMutexW(None, True, PET_MUTEX)
-    return bool(MUTEX_HANDLE) and ctypes.windll.kernel32.GetLastError() != 183
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    MUTEX_HANDLE = kernel32.CreateMutexW(None, False, PET_MUTEX)
+    return bool(MUTEX_HANDLE) and ctypes.get_last_error() != 183
 
 
 if __name__ == "__main__":

@@ -352,6 +352,27 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
             "label": quota.get("label") if quota else str(entry.get("label") or "USAGE"),
             "remaining": remaining,
         })
+    for connection_id, account in accounts.items():
+        provider = str(account.get("provider") or "unknown")
+        if provider.lower() == "codex" or not account.get("active"):
+            continue
+        quota = next((value for value in account.get("quotas") or [] if isinstance(value, dict)), None)
+        remaining = _percentage(quota.get("remaining_percent")) if quota else None
+        if remaining is None:
+            continue
+        account_name = str(account.get("name") or provider)
+        model = str(account.get("model") or "model tidak terdeteksi")
+        key = (connection_id or provider, model, account_name)
+        if (connection_id and connection_id in seen_connections) or key in seen:
+            continue
+        rows.append({
+            "provider": provider,
+            "account": account_name,
+            "model": model,
+            "connection_id": connection_id,
+            "label": quota.get("label") or "QUOTA",
+            "remaining": remaining,
+        })
     return rows
 
 def quota_bar_color(remaining: float | None) -> str:

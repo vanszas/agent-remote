@@ -110,10 +110,23 @@ def test_active_usage_rows_collapses_idle_quota_accounts():
         "active_usages": [{"provider": "codex", "connection_id": "codex", "model": "gpt", "account": "Codex", "timestamp": datetime.now(timezone.utc).isoformat()}],
         "quota_accounts": [
             {"id": "codex", "provider": "codex", "name": "Codex", "model": "gpt", "quotas": [{"remaining_percent": 19}]},
-            {"id": "ag", "provider": "antigravity", "name": "Gemini", "model": "gemini", "quotas": [{"label": "Pro", "remaining_percent": 87.9}]},
+            {"id": "ag", "provider": "antigravity", "name": "Gemini", "model": "gemini", "active": True, "quotas": [{"label": "Pro", "remaining_percent": 87.9}]},
         ],
     })
-    assert [(row["provider"], row["account"], row["remaining"]) for row in rows] == [("codex", "Codex", 19.0)]
+    assert [(row["provider"], row["account"], row["remaining"]) for row in rows] == [
+        ("codex", "Codex", 19.0),
+        ("antigravity", "Gemini", 87.9),
+    ]
+
+def test_active_usage_rows_shows_active_antigravity_quota_fallback():
+    rows = active_usage_rows({
+        "active_usages": [],
+        "quota_accounts": [{
+            "id": "ag", "provider": "antigravity", "name": "Gemini", "active": True,
+            "quotas": [{"remaining_percent": 88}],
+        }],
+    })
+    assert [(row["provider"], row["remaining"]) for row in rows] == [("antigravity", 88.0)]
 
 def test_active_usage_rows_collapses_stale_active_signal():
     stale = (datetime.now(timezone.utc) - timedelta(seconds=9)).isoformat()

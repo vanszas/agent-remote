@@ -114,11 +114,9 @@ def test_active_usage_rows_collapses_idle_quota_accounts():
         ],
     })
     assert [(row["provider"], row["account"], row["remaining"]) for row in rows] == [
-        ("codex", "Codex", 19.0),
-        ("antigravity", "Gemini", 87.9),
-    ]
+        ("codex", "Codex", 19.0),]
 
-def test_active_usage_rows_shows_active_antigravity_quota_fallback():
+def test_active_usage_rows_hides_idle_antigravity_quota():
     rows = active_usage_rows({
         "active_usages": [],
         "quota_accounts": [{
@@ -126,7 +124,7 @@ def test_active_usage_rows_shows_active_antigravity_quota_fallback():
             "quotas": [{"remaining_percent": 88}],
         }],
     })
-    assert [(row["provider"], row["remaining"]) for row in rows] == [("antigravity", 88.0)]
+    assert rows == []
 
 def test_active_usage_rows_collapses_stale_active_signal():
     stale = (datetime.now(timezone.utc) - timedelta(seconds=9)).isoformat()

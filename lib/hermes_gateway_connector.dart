@@ -500,6 +500,7 @@ class HermesGatewayConnector implements AgentConnector {
     required String sessionId,
     required String text,
     required List<AgentAttachment> attachments,
+    String? targetFolder,
   }) async {
     final live = await _resume(sessionId);
     final liveId = live['session_id'] as String;

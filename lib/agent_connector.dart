@@ -425,6 +425,7 @@ abstract class AgentConnector {
     required String sessionId,
     required String text,
     required List<AgentAttachment> attachments,
+    String? targetFolder,
   });
   Future<void> stopGeneration(String id);
   Future<void> respondToApproval({
@@ -510,6 +511,7 @@ class DemoAgentConnector implements AgentConnector {
     required String sessionId,
     required String text,
     required List<AgentAttachment> attachments,
+    String? targetFolder,
   }) async {
     _cancelled.remove(sessionId);
     final correlation = _next();

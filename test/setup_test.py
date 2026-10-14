@@ -29,9 +29,16 @@ def test_start_pc_mode_starts_router_before_pet(monkeypatch, tmp_path):
         "nine_router_command",
         lambda: ["9router", "--no-browser", "--skip-update", "--tray"],
     )
-    monkeypatch.setattr(agent_remote_setup, "run_hidden", lambda command: calls.append(command))
+    monkeypatch.setattr(
+        agent_remote_setup,
+        "run_hidden",
+        lambda command, *args, **kwargs: calls.append(command),
+    )
 
-    assert agent_remote_setup.SetupApp._start_pc_mode() == "Mode PC aktif | PET + 9Router berjalan"
+    assert (
+        agent_remote_setup.SetupApp._start_pc_mode()
+        == "Mode Full Stack aktif | PET + 9Router (Guarded) + SmartRouter (20130) + Server + Debate berjalan"
+    )
     assert calls == [
         ["9router", "--no-browser", "--skip-update", "--tray"],
         [str(pet)],

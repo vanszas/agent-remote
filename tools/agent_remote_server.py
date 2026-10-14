@@ -9,6 +9,7 @@ import queue
 import re
 import shutil
 import secrets
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -37,6 +38,17 @@ from agent_runtime import (
     now_iso,
 )
 from tailscale_control import set_tailscale_online, write_tailscale_log
+
+try:
+    from screen_streamer import STREAMER, inject_input, get_screen_bounds, list_monitors
+except ImportError:
+    try:
+        from tools.screen_streamer import STREAMER, inject_input, get_screen_bounds, list_monitors
+    except ImportError:
+        STREAMER = None
+        inject_input = None
+        get_screen_bounds = None
+        list_monitors = None
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 HOST = os.environ.get("AGENT_REMOTE_HOST") or os.environ.get(
@@ -69,8 +81,8 @@ CODEX_STATE_DB = Path(
 )
 CODEX_ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024
 CODEX_DESKTOP_THREAD_LIMIT = 200
-CODEX_DESKTOP_STALE_SECONDS = 10 * 60
-CODEX_DESKTOP_ORPHAN_SECONDS = 30 * 60
+CODEX_DESKTOP_STALE_SECONDS = 2 * 60
+CODEX_DESKTOP_ORPHAN_SECONDS = 5 * 60
 CODEX_ROLLOUT_CACHE_LOCK = threading.RLock()
 CODEX_ROLLOUT_CACHE: dict[str, tuple[int, int, dict | None]] = {}
 CODEX_ROLLOUT_CACHE_MAX_ENTRIES = 400
@@ -269,6 +281,170 @@ def stop_pet(process) -> None:
 def pet_running() -> bool:
     return PET_PROCESS is not None and PET_PROCESS.poll() is None
 
+def router_running(port: int = 20130) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+DEFAULT_INPUT_STORAGE_DIR = Path.home() / "Downloads" / "AgentRemote_Inputs"
+INPUT_STORAGE_DIR = Path(load_server_state().get("input_storage_dir", str(DEFAULT_INPUT_STORAGE_DIR)))
+DEFAULT_CUSTOM_SHORTCUTS = [
+    {"label": "Save", "key": "Ctrl+S"},
+    {"label": "Undo", "key": "Ctrl+Z"},
+    {"label": "Redo", "key": "Ctrl+Y"},
+    {"label": "Copy", "key": "Ctrl+C"},
+    {"label": "Paste", "key": "Ctrl+V"},
+    {"label": "Task Mgr", "key": "Ctrl+Shift+Esc"},
+    {"label": "Desktop", "key": "Win+D"},
+    {"label": "Alt+Tab", "key": "Alt+Tab"},
+    {"label": "Close", "key": "Alt+F4"},
+    {"label": "Enter", "key": "Enter"},
+    {"label": "Esc", "key": "Esc"},
+]
+CUSTOM_SHORTCUTS = list(load_server_state().get("custom_shortcuts", DEFAULT_CUSTOM_SHORTCUTS))
+
+TRUSTED_DEVICES_FILE = STATE_ROOT / "trusted_devices.json"
+BANNED_DEVICES_FILE = STATE_ROOT / "banned_devices.json"
+PENDING_APPROVALS: dict[str, float] = {}
+PENDING_LOCK = threading.Lock()
+
+
+def load_trusted_devices() -> dict[str, dict]:
+    try:
+        data = json.loads(TRUSTED_DEVICES_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_trusted_devices(devices: dict[str, dict]) -> None:
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = TRUSTED_DEVICES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(devices, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(TRUSTED_DEVICES_FILE)
+
+
+def load_banned_devices() -> dict[str, dict]:
+    try:
+        data = json.loads(BANNED_DEVICES_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_banned_devices(devices: dict[str, dict]) -> None:
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = BANNED_DEVICES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(devices, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(BANNED_DEVICES_FILE)
+
+
+TRUSTED_DEVICES = load_trusted_devices()
+BANNED_DEVICES = load_banned_devices()
+
+
+def is_device_banned(device_id: str, client_ip: str = "") -> bool:
+    if not device_id:
+        return False
+    d_id = str(device_id).strip()
+    if d_id in BANNED_DEVICES:
+        return True
+    if client_ip:
+        for dev in BANNED_DEVICES.values():
+            if dev.get("ip") == client_ip:
+                return True
+    return False
+
+
+REJECTED_DEVICES: dict[str, float] = {}
+PAIRING_LOCK = threading.Lock()
+PAIRING_EVENTS: dict[str, tuple[threading.Event, dict]] = {}
+
+
+def is_device_trusted(device_id: str) -> bool:
+    if not device_id or not isinstance(device_id, str):
+        return False
+    d_id = device_id.strip()
+    if is_device_banned(d_id):
+        return False
+    return d_id in TRUSTED_DEVICES
+
+
+def log_pairing_event(event_type: str, client_ip: str, device_name: str, device_id: str, detail: str = "") -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [{event_type}] IP: {client_ip} | Device: {device_name} | ID: {device_id}"
+    if detail:
+        line += f" | {detail}"
+    print(line)
+    try:
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(STATE_ROOT / "pairing_attempts.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def prompt_device_pairing_sync(device_id: str, device_name: str, client_ip: str, timeout: float = 35.0) -> bool:
+    if not device_id:
+        return False
+    if is_device_trusted(device_id):
+        return True
+
+    evt = threading.Event()
+    res_box = {"approved": False}
+    with PAIRING_LOCK:
+        PAIRING_EVENTS[device_id] = (evt, res_box)
+
+    log_pairing_event("PAIR REQUEST", client_ip, device_name, device_id, "Menampilkan dialog pop-up konfirmasi di PC")
+
+    def _ask_desktop():
+        MB_YESNO = 0x00000004
+        MB_ICONQUESTION = 0x00000020
+        MB_TOPMOST = 0x00040000
+        MB_SETFOREGROUND = 0x00010000
+        IDYES = 6
+        try:
+            res = ctypes.windll.user32.MessageBoxW(
+                0,
+                f"Perangkat baru meminta izin koneksi ke Agent Remote:\n\n"
+                f"IP Address: {client_ip}\n"
+                f"Nama Device: {device_name}\n"
+                f"Device ID: {device_id}\n\n"
+                f"Izinkan perangkat ini terhubung?",
+                "Agent Remote - Izin Perangkat Masuk",
+                MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND,
+            )
+            approved = (res == IDYES)
+            res_box["approved"] = approved
+            if approved:
+                TRUSTED_DEVICES[device_id] = {
+                    "name": device_name,
+                    "ip": client_ip,
+                    "approved_at": time.time(),
+                }
+                save_trusted_devices(TRUSTED_DEVICES)
+                log_pairing_event("PAIR APPROVED", client_ip, device_name, device_id, "Disetujui pengguna di PC")
+            else:
+                REJECTED_DEVICES[device_id] = time.time()
+                log_pairing_event("PAIR REJECTED", client_ip, device_name, device_id, "Ditolak pengguna di PC")
+        except Exception as ex:
+            log_pairing_event("PAIR ERROR", client_ip, device_name, device_id, str(ex))
+        finally:
+            evt.set()
+            with PAIRING_LOCK:
+                PAIRING_EVENTS.pop(device_id, None)
+
+    threading.Thread(target=_ask_desktop, daemon=True).start()
+    evt.wait(timeout=timeout)
+    return res_box["approved"]
+
+
+def prompt_device_pairing(device_id: str, device_name: str, client_ip: str = "unknown") -> None:
+    prompt_device_pairing_sync(device_id, device_name, client_ip, timeout=0.1)
+
+
 def save_server_state(workspace: Path, recent: list[str]):
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = STATE_FILE.with_suffix(".tmp")
@@ -277,6 +453,8 @@ def save_server_state(workspace: Path, recent: list[str]):
         "recent_workspaces": recent[:30],
         "permission_by_workspace": PERMISSION_BY_WORKSPACE,
         "global_personalization": GLOBAL_PERSONALIZATION,
+        "input_storage_dir": str(INPUT_STORAGE_DIR),
+        "custom_shortcuts": CUSTOM_SHORTCUTS,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(STATE_FILE)
 
@@ -724,12 +902,32 @@ def _process_agent_id(row: dict) -> str:
         "windowsapps\\openai.codex_" in process_path or " app-server " in command_line
     ):
         return ""
+    if agent_id == "hermes" and (
+        "apps\\desktop" in process_path
+        or "apps/desktop" in process_path
+        or "--type=" in command_line
+        or " serve" in command_line
+        or command_line.strip().endswith("serve")
+        or "server" in command_line
+        or "electron" in process_path
+    ):
+        return ""
     if agent_id:
         return agent_id
     if executable not in PC_AGENT_WRAPPERS:
         return ""
     for candidate, markers in PC_AGENT_COMMAND_MARKERS.items():
         if any(marker in command_line for marker in markers):
+            if candidate == "hermes" and (
+                "apps\\desktop" in process_path
+                or "apps/desktop" in process_path
+                or "--type=" in command_line
+                or " serve" in command_line
+                or command_line.strip().endswith("serve")
+                or "server" in command_line
+                or "electron" in process_path
+            ):
+                continue
             return candidate
     return ""
 
@@ -782,6 +980,103 @@ def _pc_agent_task(agent_id: str, state: dict, status: str, timestamp: str) -> d
         "createdAt": started_at,
         "updatedAt": timestamp,
     }
+
+
+def _scan_hermes_pc_sessions(max_age_active: float = 600.0, max_age_recent: float = 86400.0) -> list[dict]:
+    local_hermes = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes"
+    dbs: list[tuple[str, Path]] = []
+    root_db = local_hermes / "state.db"
+    if root_db.exists():
+        dbs.append(("default", root_db))
+    prof_dir = local_hermes / "profiles"
+    if prof_dir.exists():
+        for p in prof_dir.iterdir():
+            if p.is_dir() and (p / "state.db").exists():
+                dbs.append((p.name, p / "state.db"))
+
+    now = time.time()
+    tasks: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for profile, db_path in dbs:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            conn.execute("PRAGMA busy_timeout = 2000")
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            cols = {col[1] for col in c.execute("PRAGMA table_info(sessions)").fetchall()}
+            act_col = "last_activity_at" if "last_activity_at" in cols else "started_at"
+            query = f"""
+                SELECT id, title, cwd, git_repo_root, git_branch, model, started_at, {act_col} AS last_act, ended_at, tool_call_count
+                FROM sessions
+                WHERE ended_at IS NULL OR (? - {act_col}) < ?
+                ORDER BY {act_col} DESC LIMIT 20
+            """
+            rows = c.execute(query, (now, max_age_recent)).fetchall()
+            for r in rows:
+                sid = str(r["id"])
+                if sid in seen_ids:
+                    continue
+                seen_ids.add(sid)
+                last_act = float(r["last_act"] or r["started_at"] or now)
+                age = max(0.0, now - last_act)
+                ended = r["ended_at"]
+
+                if ended is None and age < max_age_active:
+                    status = "running"
+                elif ended is None:
+                    status = "idle"
+                else:
+                    status = "completed"
+
+                title = str(r["title"] or f"Hermes {profile}")
+                model = str(r["model"] or "Hermes")
+                cwd = str(r["cwd"] or r["git_repo_root"] or "")
+                ws_name = Path(cwd).name if cwd else profile
+                tools = int(r["tool_call_count"] or 0)
+                started_ts = float(r["started_at"] or now)
+                elapsed = max(0, int(now - started_ts))
+                idle = max(0, int(age))
+                started_iso = datetime.fromtimestamp(started_ts, timezone.utc).isoformat()
+                updated_iso = datetime.fromtimestamp(last_act, timezone.utc).isoformat()
+                detail = f"{model} • {tools} tool calls • {ws_name}"
+
+                tasks.append({
+                    "id": f"hermes_{sid}",
+                    "sessionId": sid,
+                    "session_id": sid,
+                    "title": title,
+                    "status": status,
+                    "detail": detail,
+                    "activeAgent": model,
+                    "agents": [model],
+                    "agentStates": [{
+                        "id": model,
+                        "name": model,
+                        "status": status,
+                        "role": f"Hermes ({profile})",
+                        "detail": f"Workspace: {ws_name}",
+                        "progress": 1.0 if status == "completed" else 0.5,
+                        "elapsedSeconds": elapsed,
+                        "idleSeconds": idle,
+                        "startedAt": started_iso,
+                        "updatedAt": updated_iso,
+                        "completedAt": updated_iso if status == "completed" else None,
+                    }],
+                    "mode": "single",
+                    "source": f"hermes:{profile}",
+                    "permission": "",
+                    "workspace": cwd,
+                    "changedFiles": 0,
+                    "elapsedSeconds": elapsed,
+                    "idleSeconds": idle,
+                    "createdAt": started_iso,
+                    "updatedAt": updated_iso,
+                })
+            conn.close()
+        except Exception:
+            pass
+    return tasks
 
 
 def list_pc_agent_tasks() -> list[dict]:
@@ -844,7 +1139,12 @@ def list_all_tasks() -> list[dict]:
             return json.loads(json.dumps(TASK_LIST_CACHE[1]))
     with CODEX_TASKS_LOCK:
         external = json.loads(json.dumps(CODEX_TASKS))
-    combined = external + list_codex_desktop_tasks() + RUNTIME.list_tasks()
+    combined = (
+        external
+        + list_codex_desktop_tasks()
+        + RUNTIME.list_tasks()
+        + _scan_hermes_pc_sessions()
+    )
     covered_active_agents = {
         str(agent_id)
         for item in combined
@@ -1869,14 +2169,28 @@ def save_workspace_file(
     return workspace_file(workspace, relative)
 
 
-def save_attachments(workspace: Path, attachments: list[dict]) -> list[Path]:
-    root = workspace / ".agent-remote" / "uploads"
+def save_attachments(
+    workspace: Path,
+    attachments: list[dict],
+    target_folder: str | None = None,
+) -> list[Path]:
+    if target_folder and str(target_folder).strip():
+        folder_str = str(target_folder).strip()
+        folder_path = Path(folder_str)
+        if folder_path.is_absolute():
+            root = folder_path.resolve()
+        else:
+            root = (workspace / folder_path).resolve()
+            if not root.is_relative_to(workspace):
+                raise ValueError("target_folder escapes workspace")
+    else:
+        root = workspace / ".agent-remote" / "uploads"
     root.mkdir(parents=True, exist_ok=True)
     saved = []
     for index, item in enumerate(attachments[:10]):
         name = Path(str(item.get("name") or f"attachment-{index}")).name
         data = base64.b64decode(str(item.get("data") or ""))
-        path = resolve_child(root, name)
+        path = root / name
         path.write_bytes(data)
         saved.append(path)
     return saved
@@ -2096,6 +2410,29 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authorized(self):
+        device_id = self.headers.get("X-Device-Id", "").strip()
+        client_ip = self.client_address[0] if self.client_address else ""
+        if device_id and is_device_banned(device_id, client_ip):
+            record_security_audit(
+                client_ip,
+                False,
+                self.command,
+                self.path,
+                self.headers.get("User-Agent", ""),
+            )
+            return False
+
+        if device_id and self.client_address[0] not in {"127.0.0.1", "::1"}:
+            if not is_device_trusted(device_id):
+                record_security_audit(
+                    self.client_address[0],
+                    False,
+                    self.command,
+                    self.path,
+                    self.headers.get("User-Agent", ""),
+                )
+                return False
+
         if not TOKEN:
             authorized = self.client_address[0] in {"127.0.0.1", "::1"}
         else:
@@ -2143,7 +2480,11 @@ class Handler(BaseHTTPRequestHandler):
                         "auto_start": pet_autostart_enabled(),
                         "running": pet_running(),
                     },
-                    "features": ["streaming", "sessions", "stop", "tools", "multi_agent", "coordinator", "security_audit", "provider_usage", "mobile_usage_filter", "file_preview", "file_edit"],
+                    "router": {
+                        "port": 20130,
+                        "running": router_running(),
+                    },
+                    "features": ["streaming", "sessions", "stop", "tools", "multi_agent", "coordinator", "security_audit", "provider_usage", "mobile_usage_filter", "file_preview", "file_edit", "router_proxy"],
                 })
             if url.path == "/api/personalization":
                 return self._json(HTTPStatus.OK, {
@@ -2157,6 +2498,14 @@ class Handler(BaseHTTPRequestHandler):
                     "peer_ip_only": True,
                     "success_window_seconds": AUTH_SUCCESS_LOG_WINDOW_SECONDS,
                     "failure_window_seconds": AUTH_FAILURE_LOG_WINDOW_SECONDS,
+                })
+            if url.path == "/api/settings/storage":
+                return self._json(HTTPStatus.OK, {
+                    "input_storage_dir": str(INPUT_STORAGE_DIR),
+                })
+            if url.path == "/api/shortcuts":
+                return self._json(HTTPStatus.OK, {
+                    "shortcuts": CUSTOM_SHORTCUTS,
                 })
             if url.path == "/api/workspaces":
                 return self._json(HTTPStatus.OK, {"workspaces": workspace_rows()})
@@ -2180,6 +2529,62 @@ class Handler(BaseHTTPRequestHandler):
                         limit=int(query.get("limit", ["50"])[0]),
                     ),
                 )
+            if url.path == "/api/screen/info":
+                if get_screen_bounds is None:
+                    return self._json(HTTPStatus.NOT_IMPLEMENTED, {"error": "Screen streaming not available"})
+                monitors = list_monitors() if list_monitors else []
+                return self._json(
+                    HTTPStatus.OK,
+                    {
+                        "resolutions": ["540p", "720p", "1080p"],
+                        "default_resolution": "720p",
+                        "monitors": monitors,
+                        "default_monitor": "primary",
+                        "bounds": {
+                            "primary": get_screen_bounds("primary"),
+                            "virtual": get_screen_bounds("virtual"),
+                        },
+                    },
+                )
+            if url.path == "/api/screen/profiles":
+                from tools.screen_streamer import STREAM_PROFILES
+                return self._json(HTTPStatus.OK, {"profiles": list(STREAM_PROFILES.values())})
+            if url.path == "/api/screen/frame":
+                if STREAMER is None:
+                    return self._json(HTTPStatus.NOT_IMPLEMENTED, {"error": "Screen streaming not available"})
+                res = query.get("res", ["720p"])[0]
+                qual = int(query.get("quality", ["70"])[0])
+                mon = query.get("monitor", ["primary"])[0]
+                prof = query.get("profile", [None])[0]
+                frame = STREAMER.grab_jpeg(resolution=res, quality=qual, monitor=mon, profile=prof)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(frame)))
+                self.send_header("Cache-Control", "no-cache, no-store")
+                self.end_headers()
+                self.wfile.write(frame)
+                return
+            if url.path == "/api/screen/stream":
+                if STREAMER is None:
+                    return self._json(HTTPStatus.NOT_IMPLEMENTED, {"error": "Screen streaming not available"})
+                fps = int(query.get("fps", ["20"])[0])
+                res = query.get("res", ["720p"])[0]
+                qual = int(query.get("quality", ["70"])[0])
+                mon = query.get("monitor", ["primary"])[0]
+                prof = query.get("profile", [None])[0]
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    for chunk in STREAMER.stream_mjpeg(fps=fps, resolution=res, quality=qual, monitor=mon, profile=prof):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             if url.path == "/api/folders":
                 return self._json(
                     HTTPStatus.OK,
@@ -2202,6 +2607,111 @@ class Handler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {'file': workspace_file(WORKSPACE, query.get('path', [''])[0])},
                 )
+            if url.path == "/api/debate/models":
+                key = nine_router_mobile_key()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:20128/v1/models",
+                    headers={"Authorization": f"Bearer {key}"} if key else {}
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        model_ids = [m["id"] for m in data.get("data", [])]
+                        return self._json(HTTPStatus.OK, {"models": model_ids})
+                except Exception as ex:
+                    return self._json(HTTPStatus.OK, {"models": ["QODER", "ag/gemini-3.7-flash-high", "ag/claude-sonnet-4-6"]})
+            if url.path == "/api/debate/config":
+                from pathlib import Path
+                cfg_file = Path.home() / ".hermes" / "hdo" / "config.json"
+                if cfg_file.exists():
+                    try:
+                        return self._json(HTTPStatus.OK, json.loads(cfg_file.read_text(encoding="utf-8")))
+                    except Exception:
+                        pass
+                return self._json(HTTPStatus.OK, {})
+            if url.path == "/api/debate/status":
+                try:
+                    req = urllib.request.urlopen("http://127.0.0.1:8787/api/health", timeout=1.5)
+                    data = json.loads(req.read().decode("utf-8"))
+                    return self._json(HTTPStatus.OK, {"running": True, "data": data, "url": "http://127.0.0.1:8787"})
+                except Exception:
+                    return self._json(HTTPStatus.OK, {"running": False, "url": None})
+            if url.path == "/api/router/models":
+                key = nine_router_mobile_key()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:20128/v1/models",
+                    headers={"Authorization": f"Bearer {key}"} if key else {}
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        model_ids = [m["id"] for m in data.get("data", [])]
+                        return self._json(HTTPStatus.OK, {"models": model_ids})
+                except Exception:
+                    return self._json(HTTPStatus.OK, {"models": [
+                        "ag/gemini-3.8-flash-high", "ag/gemini-3.7-flash-high",
+                        "ag/claude-opus-4-6-thinking", "ag/claude-sonnet-4-6",
+                        "cx/gpt-5.6-luna", "free-model", "unreal-engine", "china-model"
+                    ]})
+            if url.path == "/api/router/config":
+                cfg_path = STATE_ROOT / "router_config.json"
+                default_cfg = {
+                    "enabled": True,
+                    "mode": "auto",
+                    "simple_model": "ag/gemini-3.8-flash-high",
+                    "complex_model": "ag/claude-opus-4-6-thinking",
+                    "fallback_models": ["ag/gemini-3.7-flash-high", "ag/claude-sonnet-4-6", "cx/gpt-5.6-luna", "free-model"],
+                    "complexity_threshold": 35,
+                    "listen_port": 20130,
+                    "upstream_url": "http://localhost:20128/v1",
+                }
+                if cfg_path.is_file():
+                    try:
+                        loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+                        default_cfg.update(loaded)
+                    except Exception:
+                        pass
+                return self._json(HTTPStatus.OK, default_cfg)
+            if url.path == "/api/skills":
+                # Return PC Hermes skills + slash commands
+                skills_list = [
+                    {"name": "debate", "command": "/debate", "description": "Debat multi-AI (Codex vs Claude vs Antigravity)"},
+                    {"name": "fable-mind", "command": "/fable-mind", "description": "Protokol empiris & grounding output Fable 5.1"},
+                    {"name": "caveman", "command": "/caveman", "description": "Mode komunikasi ringkas, to-the-point tanpa filler"},
+                    {"name": "ponytail", "command": "/ponytail", "description": "Minimalis YAGNI & standard library first"},
+                    {"name": "codex", "command": "/codex", "description": "Delegasikan coding task ke Codex CLI"},
+                    {"name": "antigravity", "command": "/antigravity", "description": "Delegasikan coding task ke Antigravity CLI"},
+                    {"name": "claude-code", "command": "/claude-code", "description": "Delegasikan coding task ke Claude Code CLI"},
+                ]
+                try:
+                    import os
+                    from pathlib import Path
+                    dirs = [
+                        Path.home() / ".hermes" / "skills",
+                        Path.home() / "AppData" / "Local" / "hermes" / "profiles" / "vans" / "skills",
+                        Path.home() / "AppData" / "Local" / "hermes" / "skills",
+                    ]
+                    seen = {s["name"] for s in skills_list}
+                    for d in dirs:
+                        if d.is_dir():
+                            for item in d.iterdir():
+                                if item.is_dir() and item.name not in seen and not item.name.startswith("."):
+                                    seen.add(item.name)
+                                    skills_list.append({
+                                        "name": item.name,
+                                        "command": f"/{item.name}",
+                                        "description": f"Skill PC: {item.name}",
+                                    })
+                except Exception as ex:
+                    logger.warning(f"Error enumerating skills: {ex}")
+                return self._json(HTTPStatus.OK, {"skills": skills_list})
+            if url.path == "/api/router/status":
+                try:
+                    req = urllib.request.urlopen("http://127.0.0.1:20130/health", timeout=1.5)
+                    data = json.loads(req.read().decode("utf-8"))
+                    return self._json(HTTPStatus.OK, {"running": True, **data})
+                except Exception:
+                    return self._json(HTTPStatus.OK, {"running": False, "port": 20130})
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except KeyError:
             self._json(HTTPStatus.NOT_FOUND, {"error": "session not found"})
@@ -2232,9 +2742,104 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.BAD_REQUEST, {'error': str(error)})
 
     def do_POST(self):
+        global RECENT_WORKSPACES, INPUT_STORAGE_DIR, CUSTOM_SHORTCUTS, GLOBAL_PERSONALIZATION
+        if self.path == "/api/fs/pick_desktop":
+            def _ask_dir():
+                import tkinter as tk
+                from tkinter import filedialog
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    selected = filedialog.askdirectory(title="Pilih Folder untuk Agent Remote")
+                    root.destroy()
+                    return selected or ""
+                except Exception as ex:
+                    logger.warning(f"Failed to open desktop file dialog: {ex}")
+                    return ""
+            res = _ask_dir()
+            return self._json(HTTPStatus.OK, {"path": res})
+        if self.path == "/api/auth/pair":
+            client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+            payload = self._payload()
+            device_id = str(payload.get("device_id") or "").strip()
+            device_name = str(payload.get("device_name") or "Perangkat Baru").strip()
+            if not device_id:
+                log_pairing_event("PAIR REJECTED", client_ip, device_name, "", "device_id kosong")
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "device_id is required"})
+            if is_device_banned(device_id, client_ip):
+                log_pairing_event("PAIR BANNED", client_ip, device_name, device_id, "Device diblokir (banned)")
+                return self._json(HTTPStatus.FORBIDDEN, {
+                    "status": "banned",
+                    "error": "Perangkat telah diblokir oleh host PC.",
+                })
+            if is_device_trusted(device_id):
+                log_pairing_event("PAIR AUTO-APPROVED", client_ip, device_name, device_id, "Device sudah terdaftar, izin otomatis")
+                if device_id in TRUSTED_DEVICES:
+                    TRUSTED_DEVICES[device_id]["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    TRUSTED_DEVICES[device_id]["ip"] = client_ip
+                    save_trusted_devices(TRUSTED_DEVICES)
+                return self._json(HTTPStatus.OK, {
+                    "status": "approved",
+                    "token": TOKEN,
+                })
+            approved = prompt_device_pairing_sync(device_id, device_name, client_ip, timeout=35.0)
+            if approved:
+                return self._json(HTTPStatus.OK, {
+                    "status": "approved",
+                    "token": TOKEN,
+                })
+            return self._json(HTTPStatus.FORBIDDEN, {
+                "status": "rejected",
+                "error": "Koneksi ditolak oleh pengguna di PC",
+            })
+
         if not self._authorized():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         try:
+            if self.path == "/api/devices":
+                return self._json(HTTPStatus.OK, {
+                    "trusted": list(TRUSTED_DEVICES.values()),
+                    "banned": list(BANNED_DEVICES.values()),
+                })
+            if self.path == "/api/devices/revoke":
+                payload = self._payload()
+                dev_id = str(payload.get("device_id") or "").strip()
+                if not dev_id:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "device_id required"})
+                if dev_id in TRUSTED_DEVICES:
+                    del TRUSTED_DEVICES[dev_id]
+                    save_trusted_devices(TRUSTED_DEVICES)
+                return self._json(HTTPStatus.OK, {"status": "revoked", "device_id": dev_id})
+            if self.path == "/api/devices/ban":
+                payload = self._payload()
+                dev_id = str(payload.get("device_id") or "").strip()
+                name = str(payload.get("device_name") or "").strip()
+                reason = str(payload.get("reason") or "Manual ban").strip()
+                if not dev_id:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "device_id required"})
+                # Remove from trusted
+                if dev_id in TRUSTED_DEVICES:
+                    name = name or TRUSTED_DEVICES[dev_id].get("device_name", "")
+                    del TRUSTED_DEVICES[dev_id]
+                    save_trusted_devices(TRUSTED_DEVICES)
+                BANNED_DEVICES[dev_id] = {
+                    "device_id": dev_id,
+                    "device_name": name or "Perangkat Diblokir",
+                    "reason": reason,
+                    "banned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                save_banned_devices(BANNED_DEVICES)
+                return self._json(HTTPStatus.OK, {"status": "banned", "device_id": dev_id})
+            if self.path == "/api/devices/unban":
+                payload = self._payload()
+                dev_id = str(payload.get("device_id") or "").strip()
+                if not dev_id:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "device_id required"})
+                if dev_id in BANNED_DEVICES:
+                    del BANNED_DEVICES[dev_id]
+                    save_banned_devices(BANNED_DEVICES)
+                return self._json(HTTPStatus.OK, {"status": "unbanned", "device_id": dev_id})
             if self.path == "/api/codex-events":
                 return self._json(
                     HTTPStatus.CREATED,
@@ -2248,6 +2853,48 @@ class Handler(BaseHTTPRequestHandler):
                     str(WORKSPACE),
                 )
                 return self._json(HTTPStatus.CREATED, {"session": session})
+            if self.path == "/api/screen/input":
+                if inject_input is None:
+                    return self._json(HTTPStatus.NOT_IMPLEMENTED, {"error": "Input injection not available"})
+                try:
+                    payload = self._payload()
+                    inp = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+                    action = str(inp.get("action") or "move")
+                    key = str(inp.get("key") or inp.get("text") or "")
+                    text = str(inp.get("text") or inp.get("key") or "")
+
+                    res = inject_input(
+                        action=action,
+                        x=float(inp.get("x") or 0.0),
+                        y=float(inp.get("y") or 0.0),
+                        button=str(inp.get("button") or "left"),
+                        delta=int(inp.get("delta") or 0),
+                        key=key,
+                        text=text,
+                        monitor=str(inp.get("monitor") or "primary"),
+                    )
+                    return self._json(HTTPStatus.OK, res)
+                except Exception as err:
+                    logger.exception(f"Screen input error: {err}")
+                    return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
+            if self.path == "/api/screen/hotkey":
+                if inject_input is None:
+                    return self._json(HTTPStatus.NOT_IMPLEMENTED, {"error": "Input injection not available"})
+                payload = self._payload()
+                key = str(payload.get("key") or "").strip()
+                res = inject_input(action="hotkey", key=key)
+                return self._json(HTTPStatus.OK, res)
+            if self.path == "/api/upload":
+                payload = self._payload()
+                attachments = save_attachments(
+                    WORKSPACE,
+                    payload.get("attachments", []),
+                    target_folder=payload.get("target_folder"),
+                )
+                return self._json(
+                    HTTPStatus.OK,
+                    {"saved": [str(p) for p in attachments]},
+                )
             if self.path == "/api/workspace":
                 payload = self._payload()
                 selected = select_workspace(str(payload.get("path") or ""))
@@ -2263,11 +2910,167 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             if self.path == "/api/personalization":
-                global GLOBAL_PERSONALIZATION
                 payload = self._payload()
                 GLOBAL_PERSONALIZATION = validate_personalization(payload.get("global"))
                 save_server_state(WORKSPACE, RECENT_WORKSPACES)
                 return self._json(HTTPStatus.OK, {"global": GLOBAL_PERSONALIZATION})
+            if self.path == "/api/settings/storage":
+                payload = self._payload()
+                new_dir = str(payload.get("input_storage_dir") or "").strip()
+                if not new_dir:
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "input_storage_dir is required"})
+                p = Path(new_dir).resolve()
+                p.mkdir(parents=True, exist_ok=True)
+                INPUT_STORAGE_DIR = p
+                save_server_state(WORKSPACE, RECENT_WORKSPACES)
+                return self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "input_storage_dir": str(INPUT_STORAGE_DIR),
+                })
+            if self.path == "/api/workspaces/add":
+                payload = self._payload()
+                path_str = str(payload.get("path") or "").strip()
+                p = Path(path_str).resolve()
+                if not p.is_dir():
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "Folder not found"})
+                p_str = str(p)
+                if p_str not in RECENT_WORKSPACES:
+                    RECENT_WORKSPACES.insert(0, p_str)
+                    RECENT_WORKSPACES = RECENT_WORKSPACES[:30]
+                save_server_state(WORKSPACE, RECENT_WORKSPACES)
+                return self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "workspaces": workspace_rows(),
+                })
+            if self.path == "/api/workspaces/remove":
+                payload = self._payload()
+                path_str = str(payload.get("path") or "").strip()
+                p_str = str(Path(path_str).resolve())
+                if p_str == str(WORKSPACE):
+                    return self._json(HTTPStatus.BAD_REQUEST, {"error": "Cannot remove currently active workspace"})
+                RECENT_WORKSPACES = [w for w in RECENT_WORKSPACES if w != p_str]
+                save_server_state(WORKSPACE, RECENT_WORKSPACES)
+                return self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "workspaces": workspace_rows(),
+                })
+            if self.path == "/api/workspaces/select":
+                payload = self._payload()
+                selected = select_workspace(str(payload.get("path") or ""))
+                return self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "workspace": {
+                        "id": str(selected),
+                        "name": selected.name,
+                        "path": str(selected),
+                        "is_active": True,
+                    },
+                    "workspaces": workspace_rows(),
+                })
+            if self.path == "/api/shortcuts":
+                payload = self._payload()
+                shortcuts_list = payload.get("shortcuts")
+                if isinstance(shortcuts_list, list):
+                    CUSTOM_SHORTCUTS = shortcuts_list
+                    save_server_state(WORKSPACE, RECENT_WORKSPACES)
+                return self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "shortcuts": CUSTOM_SHORTCUTS,
+                })
+            if self.path == "/api/debate/config":
+                payload = self._payload()
+                from pathlib import Path
+                cfg_file = Path.home() / ".hermes" / "hdo" / "config.json"
+                cfg_file.parent.mkdir(parents=True, exist_ok=True)
+                cfg_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                return self._json(HTTPStatus.OK, {"ok": True, "saved": True})
+            if self.path == "/api/debate/start":
+                payload = self._payload()
+                run_id = str(payload.get("run_id") or "ACTIVE-SESSION")
+                import sys
+                from pathlib import Path
+                plugins_dir = Path.home() / "AppData" / "Local" / "hermes" / "profiles" / "vans" / "plugins"
+                if str(plugins_dir) not in sys.path:
+                    sys.path.insert(0, str(plugins_dir))
+                import importlib
+                hdo_srv = importlib.import_module("hermes-debate-orchestrator.server")
+                srv = hdo_srv.DashboardServer.get_instance()
+                res = srv.start()
+                res["dashboard_url"] = f"{res['url']}/index.html?run={run_id}"
+                return self._json(HTTPStatus.OK, {"ok": True, **res})
+            if self.path == "/api/debate/stop":
+                import sys
+                from pathlib import Path
+                plugins_dir = Path.home() / "AppData" / "Local" / "hermes" / "profiles" / "vans" / "plugins"
+                if str(plugins_dir) not in sys.path:
+                    sys.path.insert(0, str(plugins_dir))
+                import importlib
+                hdo_srv = importlib.import_module("hermes-debate-orchestrator.server")
+                hdo_srv.DashboardServer.get_instance().stop()
+                return self._json(HTTPStatus.OK, {"ok": True, "status": "stopped"})
+            if self.path == "/api/router/config":
+                payload = self._payload()
+                cfg_path = STATE_ROOT / "router_config.json"
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                current = {
+                    "enabled": True,
+                    "mode": "auto",
+                    "simple_model": "ag/gemini-3.8-flash-high",
+                    "complex_model": "ag/claude-opus-4-6-thinking",
+                    "fallback_models": ["ag/gemini-3.7-flash-high", "ag/claude-sonnet-4-6", "cx/gpt-5.6-luna", "free-model"],
+                    "complexity_threshold": 35,
+                    "listen_port": 20130,
+                    "upstream_url": "http://localhost:20128/v1",
+                }
+                if cfg_path.is_file():
+                    try:
+                        current.update(json.loads(cfg_path.read_text(encoding="utf-8")))
+                    except Exception:
+                        pass
+                current.update(payload)
+                cfg_path.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                # Sync ke config.yaml LiteLLM (Port 4010) agar SmartHermes pakai model 9Router pilihan user
+                try:
+                    proxy_yaml = ROOT / "tools" / "litellm_proxy" / "config.yaml"
+                    if proxy_yaml.is_file():
+                        s_model = current.get("simple_model", "ag/gemini-3.8-flash-high").strip()
+                        c_model = current.get("complex_model", "ag/claude-opus-4-6-thinking").strip()
+                        txt = proxy_yaml.read_text(encoding="utf-8")
+                        import re
+                        # Update simple model mapping
+                        txt = re.sub(
+                            r"(- model_name:\s*gemini_flash_high\s*\n\s*litellm_params:\s*\n\s*model:\s*)openai/[^\n]+",
+                            r"\g<1>openai/" + s_model,
+                            txt
+                        )
+                        txt = re.sub(
+                            r"(gemini_flash_high:\s*\n\s*route:\s*)[^\n]+",
+                            r"\g<1>" + s_model,
+                            txt
+                        )
+                        # Update complex model mapping
+                        txt = re.sub(
+                            r"(- model_name:\s*claude_opus_46_thinking\s*\n\s*litellm_params:\s*\n\s*model:\s*)openai/[^\n]+",
+                            r"\g<1>openai/" + c_model,
+                            txt
+                        )
+                        txt = re.sub(
+                            r"(claude_opus_46_thinking:\s*\n\s*route:\s*)[^\n]+",
+                            r"\g<1>" + c_model,
+                            txt
+                        )
+                        # Update default entry SmartHermes
+                        txt = re.sub(
+                            r"(- model_name:\s*SmartHermes\s*\n\s*litellm_params:\s*\n\s*model:\s*)openai/[^\n]+",
+                            r"\g<1>openai/" + s_model,
+                            txt
+                        )
+                        proxy_yaml.write_text(txt, encoding="utf-8")
+                except Exception as ex:
+                    print(f"[SmartHermes Config Sync Error] {ex}")
+
+                return self._json(HTTPStatus.OK, {"ok": True, "config": current})
             if self.path == "/api/permission":
                 payload = self._payload()
                 permission = str(payload.get("permission") or "")
@@ -2288,10 +3091,33 @@ class Handler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id") or "")
             if not text:
                 raise ValueError("text is required")
+
             session = STORE.get(session_id)
+            history_msgs = session.get("messages", []) if isinstance(session, dict) else getattr(session, "messages", [])
+
+            # --- AUTO SPAWN REAL MULTI-AGENT DEBATE (CONTEXT-AWARE RESOLUTION) ---
+            try:
+                import sys
+                from pathlib import Path
+                plugins_dir = Path.home() / "AppData" / "Local" / "hermes" / "profiles" / "vans" / "plugins"
+                if str(plugins_dir) not in sys.path:
+                    sys.path.insert(0, str(plugins_dir))
+                import importlib
+                hdo_resolver = importlib.import_module("hermes-debate-orchestrator.context_resolver")
+                resolved_task = hdo_resolver.resolve_debate_task(text, history_msgs)
+                
+                if resolved_task:
+                    hdo_module = importlib.import_module("hermes-debate-orchestrator")
+                    srv = hdo_module.DashboardServer.get_instance()
+                    srv.start()
+                    hdo_module.MANAGER.create_and_spawn_run(resolved_task, event_bus=srv.event_bus)
+            except Exception as ex:
+                print(f"[HDO Auto-Spawn Error] {ex}")
+
             attachments = save_attachments(
                 WORKSPACE,
                 payload.get("attachments", []),
+                target_folder=payload.get("target_folder"),
             )
             installed = {
                 agent["id"] for agent in available_agents()

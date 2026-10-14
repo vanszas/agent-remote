@@ -16,9 +16,12 @@ import 'clipboard_image.dart';
 import 'background_task_monitor.dart';
 import 'credential_store.dart';
 import 'agent_remote_connector.dart';
+import 'screen_remote_page.dart';
+import 'icons8_icon.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await DeviceIdentityStore.getOrCreate();
   runApp(const AgentRemoteBootstrap());
 }
 
@@ -110,9 +113,39 @@ class _AgentRemoteBootstrapState extends State<AgentRemoteBootstrap> {
   ) async {
     try {
       final credentials = await CredentialStore().load(profile.id);
-      await controller.connect(
-        AgentRemoteConnector(Uri.parse(endpoint), credentials?.password ?? ''),
-      );
+      var activeToken = credentials?.password ?? '';
+      try {
+        await controller.connect(
+          AgentRemoteConnector(Uri.parse(endpoint), activeToken),
+        );
+      } catch (connError) {
+        final errMsg = connError.toString().toLowerCase();
+        if (activeToken.isNotEmpty ||
+            errMsg.contains('401') ||
+            errMsg.contains('unauthorized') ||
+            errMsg.contains('ditolak')) {
+          try {
+            final tempConnector = AgentRemoteConnector(Uri.parse(endpoint), '');
+            final pairRes = await tempConnector.pairDevice(deviceName: 'Perangkat Android');
+            final newToken = pairRes['token'] as String? ?? '';
+            if (newToken.isNotEmpty) {
+              await CredentialStore().save(
+                profile.id,
+                GatewayCredentials('admin', newToken),
+              );
+              await controller.connect(
+                AgentRemoteConnector(Uri.parse(endpoint), newToken),
+              );
+            } else {
+              rethrow;
+            }
+          } catch (_) {
+            rethrow;
+          }
+        } else {
+          rethrow;
+        }
+      }
       if (controller.isDemo) return;
       await controller.loadWorkspaces(
         profile.values['workspacePath'] as String?,
@@ -344,7 +377,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       0 => ChatsPage(c),
       1 => TasksPage(c),
       2 => FilesPage(c),
-      3 => SettingsPage(c, connections),
+      3 => MirrorTab(c),
+      4 => SettingsPage(c, connections),
       _ => UsagePage(c),
     },
   );
@@ -385,7 +419,18 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           });
     final latestTask = activeTasks.firstOrNull;
     _loadedPages.add(c.page);
-    return Scaffold(
+    return PopScope(
+      canPop:
+          c.page == 0 && (c.workspacePath == null || c.workspacePath!.isEmpty),
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (c.page != 0) {
+          _selectPage(0);
+        } else if (c.workspacePath != null && c.workspacePath!.isNotEmpty) {
+          unawaited(c.selectWorkspace(''));
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         titleSpacing: 16,
         title: Row(
@@ -498,6 +543,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 ),
               ],
             ),
+      ),
     );
   }
 }
@@ -506,9 +552,69 @@ const nav = [
   (Icons.home_outlined, 'Beranda'),
   (Icons.task_alt, 'Proses'),
   (Icons.folder_outlined, 'File'),
+  (Icons.desktop_windows_outlined, 'Mirror'),
   (Icons.settings_outlined, 'Setelan'),
   (Icons.monitor_heart_outlined, 'Token'),
 ];
+
+class MirrorTab extends StatelessWidget {
+  const MirrorTab(this.c, {super.key});
+  final AppController c;
+
+  @override
+  Widget build(BuildContext context) {
+    if (c.connector is AgentRemoteConnector) {
+      return ScreenRemotePage(
+        app: c,
+        remote: c.connector as AgentRemoteConnector,
+        isTab: true,
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Mirror Layar PC'),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.desktop_windows_outlined,
+                size: 64,
+                color: Colors.blueGrey,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Mirror Layar PC',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Hubungkan aplikasi ke Agent Remote PC (ServerStart) untuk melihat dan mengontrol layar PC secara realtime.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.white70,
+                    ),
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: () {
+                  final state =
+                      context.findAncestorStateOfType<_AppShellState>();
+                  state?._selectPage(4);
+                },
+                icon: const Icon(Icons.settings_outlined),
+                label: const Text('Buka Setelan Koneksi'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _RootNavIcon extends StatelessWidget {
   const _RootNavIcon({required this.icon, required this.count});
@@ -782,7 +888,7 @@ class _HomeWorkspaceOverview extends StatelessWidget {
                 value: 'agent',
                 child: ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.smart_toy_outlined),
+                  leading: const Icons8Icon.bot(size: 24),
                   title: const Text('Agent'),
                   subtitle: Text('${remote.selectedAgentIds.length} dipilih'),
                 ),
@@ -900,7 +1006,7 @@ Future<void> showAgentSheet(
                     label: Text(
                       '${remote.availableAgents.where((agent) => agent.installed).length}',
                     ),
-                    child: const Icon(Icons.smart_toy_outlined),
+                    child: const Icons8Icon.bot(size: 24),
                   ),
                 ],
               ),
@@ -1319,20 +1425,38 @@ String _executionModeTokenNote(RemoteExecutionMode mode) => switch (mode) {
     'Token lebih besar karena worker dan koordinator sama-sama berjalan.',
 };
 
-Future<void> showFolderSheet(
+Future<String?> showFolderSheet(
   BuildContext context,
   AppController app,
-  AgentRemoteConnector remote,
-) => showModalBottomSheet<void>(
+  AgentRemoteConnector remote, {
+  String? title,
+  String? initialPath,
+  ValueChanged<String>? onSelect,
+}) => showModalBottomSheet<String>(
   context: context,
   isScrollControlled: true,
-  builder: (sheetContext) => _FolderPickerSheet(app: app, remote: remote),
+  builder: (sheetContext) => _FolderPickerSheet(
+    app: app,
+    remote: remote,
+    title: title,
+    initialPath: initialPath,
+    onSelect: onSelect,
+  ),
 );
 
 class _FolderPickerSheet extends StatefulWidget {
-  const _FolderPickerSheet({required this.app, required this.remote});
+  const _FolderPickerSheet({
+    required this.app,
+    required this.remote,
+    this.title,
+    this.initialPath,
+    this.onSelect,
+  });
   final AppController app;
   final AgentRemoteConnector remote;
+  final String? title;
+  final String? initialPath;
+  final ValueChanged<String>? onSelect;
 
   @override
   State<_FolderPickerSheet> createState() => _FolderPickerSheetState();
@@ -1350,7 +1474,7 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
   @override
   void initState() {
     super.initState();
-    _load(widget.app.workspacePath ?? '');
+    _load(widget.initialPath ?? widget.app.workspacePath ?? '');
   }
 
   @override
@@ -1389,8 +1513,12 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
       error = null;
     });
     try {
-      await widget.app.selectWorkspace(path);
-      if (mounted) Navigator.pop(context);
+      if (widget.onSelect != null) {
+        widget.onSelect!(path);
+      } else {
+        await widget.app.selectWorkspace(path);
+      }
+      if (mounted) Navigator.pop(context, path);
     } catch (exception) {
       if (!mounted) return;
       setState(() {
@@ -1438,11 +1566,13 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Pilih folder PC',
+                          widget.title ?? 'Pilih folder PC',
                           style: Theme.of(context).textTheme.headlineSmall,
                         ),
                         Text(
-                          'Bebas pilih disk atau folder kerja yang tersedia.',
+                          widget.onSelect != null
+                              ? 'Pilih folder tujuan untuk menyimpan file di PC.'
+                              : 'Bebas pilih disk atau folder kerja yang tersedia.',
                           style: TextStyle(color: colors.onSurfaceVariant),
                         ),
                       ],
@@ -1529,7 +1659,9 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
                       : const Icon(Icons.folder_special_outlined),
                   label: Text(
                     selecting
-                        ? 'Mengaktifkan folder...'
+                        ? 'Memproses folder...'
+                        : widget.onSelect != null
+                        ? 'Simpan ke folder ini'
                         : isCurrentWorkspace
                         ? 'Gunakan folder aktif'
                         : 'Gunakan folder ini',
@@ -1754,6 +1886,16 @@ class ProjectSessionGroup extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            IconButton(
+              icon: const Icon(Icons.add_comment_outlined, size: 20),
+              tooltip: 'Sesi baru di workspace ini',
+              onPressed: () async {
+                if (c.workspacePath != project.workspace.path) {
+                  await c.selectWorkspace(project.workspace.path);
+                }
+                await c.newSession();
+              },
+            ),
             if (project.isGitRepository)
               Tooltip(
                 message: 'Git repository terdeteksi',
@@ -1763,13 +1905,13 @@ class ProjectSessionGroup extends StatelessWidget {
                   color: colors.secondary,
                 ),
               ),
-            if (project.isGitRepository) const SizedBox(width: 10),
+            if (project.isGitRepository) const SizedBox(width: 8),
             if (activeTasks.isNotEmpty)
               Badge(
                 label: Text('${activeTasks.length}'),
                 child: Icon(Icons.bolt, color: colors.primary),
               ),
-            if (activeTasks.isNotEmpty) const SizedBox(width: 12),
+            if (activeTasks.isNotEmpty) const SizedBox(width: 8),
             Icon(
               active ? Icons.radio_button_checked : Icons.expand_more,
               size: 20,
@@ -1779,25 +1921,23 @@ class ProjectSessionGroup extends StatelessWidget {
         onExpansionChanged: (expanded) {
           if (expanded && !active) c.selectWorkspace(project.workspace.path);
         },
-        children: sessions.isEmpty
-            ? [
-                ListTile(
-                  dense: true,
-                  title: const Text('Belum ada session'),
-                  trailing: FilledButton.tonal(
-                    onPressed: () async {
-                      if (c.workspacePath != project.workspace.path) {
-                        await c.selectWorkspace(project.workspace.path);
-                      }
-                      await c.newSession();
-                    },
-                    child: const Text('Session baru'),
-                  ),
-                ),
-              ]
-            : sessions
-                  .map((session) => ProjectSessionTile(c, project, session))
-                  .toList(),
+        children: [
+          ListTile(
+            dense: true,
+            leading: Icon(Icons.add_circle_outline, color: colors.primary),
+            title: Text(
+              'Sesi baru di workspace ini',
+              style: TextStyle(color: colors.primary, fontWeight: FontWeight.w600),
+            ),
+            onTap: () async {
+              if (c.workspacePath != project.workspace.path) {
+                await c.selectWorkspace(project.workspace.path);
+              }
+              await c.newSession();
+            },
+          ),
+          ...sessions.map((session) => ProjectSessionTile(c, project, session)),
+        ],
       ),
     );
   }
@@ -1984,7 +2124,7 @@ class ProjectSessionTile extends StatelessWidget {
                         ),
                         if (session.activeModelName?.trim().isNotEmpty == true)
                           _SessionMetaBadge(
-                            icon: Icons.smart_toy_outlined,
+                            iconWidget: Icons8Icon.ai(size: 13, color: colors.secondary),
                             label: session.activeModelName!.trim(),
                             color: colors.secondary,
                           ),
@@ -2012,11 +2152,13 @@ class ProjectSessionTile extends StatelessWidget {
 
 class _SessionMetaBadge extends StatelessWidget {
   const _SessionMetaBadge({
-    required this.icon,
+    this.icon,
+    this.iconWidget,
     required this.label,
     required this.color,
   });
-  final IconData icon;
+  final IconData? icon;
+  final Widget? iconWidget;
   final String label;
   final Color color;
 
@@ -2031,7 +2173,7 @@ class _SessionMetaBadge extends StatelessWidget {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 13, color: color),
+        iconWidget ?? Icon(icon, size: 13, color: color),
         const SizedBox(width: 4),
         Flexible(
           child: Text(
@@ -2215,7 +2357,7 @@ class _ChatContextBar extends StatelessWidget {
           children: [
             _ContextChip(icon: Icons.folder_outlined, label: folder),
             const SizedBox(width: 7),
-            _ContextChip(icon: Icons.smart_toy_outlined, label: agentLabel),
+            _ContextChip(iconWidget: const Icons8Icon.bot(size: 15), label: agentLabel),
             if (task != null) ...[
               const SizedBox(width: 7),
               _ContextChip(
@@ -2237,8 +2379,9 @@ class _ChatContextBar extends StatelessWidget {
 }
 
 class _ContextChip extends StatelessWidget {
-  const _ContextChip({required this.icon, required this.label});
-  final IconData icon;
+  const _ContextChip({this.icon, this.iconWidget, required this.label});
+  final IconData? icon;
+  final Widget? iconWidget;
   final String label;
 
   @override
@@ -2251,7 +2394,7 @@ class _ContextChip extends StatelessWidget {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 15),
+        iconWidget ?? Icon(icon, size: 15),
         const SizedBox(width: 5),
         Text(label, style: Theme.of(context).textTheme.labelMedium),
       ],
@@ -2263,6 +2406,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final text = TextEditingController();
   final messageScroll = ScrollController();
   final pending = <AgentAttachment>[];
+  String? uploadTargetFolder;
   bool submitting = false;
   bool awayFromLatest = false;
   int unseenMessages = 0;
@@ -2270,10 +2414,70 @@ class _ChatScreenState extends State<ChatScreen> {
   String? trackedSessionId;
   String? trackedLatestMessageId;
 
+  Future<void> _pickUploadTargetFolder() async {
+    final connector = widget.c.connector;
+    if (connector is! AgentRemoteConnector) return;
+    final selected = await showFolderSheet(
+      context,
+      widget.c,
+      connector,
+      title: 'Pilih folder tujuan upload',
+      initialPath: uploadTargetFolder ?? widget.c.workspacePath,
+      onSelect: (folder) {
+        setState(() => uploadTargetFolder = folder);
+      },
+    );
+    if (selected != null && mounted) {
+      setState(() => uploadTargetFolder = selected);
+    }
+  }
+
+  List<Map<String, String>> _availableSkills = [];
+
+  static const _defaultSkills = [
+    {'name': 'debate', 'description': 'Multi-AI Plan, Code & Architecture Debate'},
+    {'name': 'fable-mind', 'description': 'Fable 5.1 empirical grounding & reporting'},
+    {'name': 'caveman', 'description': 'Terse caveman responses'},
+    {'name': 'ponytail', 'description': 'Minimalist pragmatic code (YAGNI)'},
+    {'name': 'codex', 'description': 'Delegate coding to Codex agent'},
+    {'name': 'antigravity', 'description': 'Delegate coding to Antigravity agent'},
+    {'name': 'claude-code', 'description': 'Delegate coding to Claude Code agent'},
+  ];
+
+  List<Map<String, String>> get _effectiveSkills {
+    final merged = <String, Map<String, String>>{};
+    for (final s in _defaultSkills) {
+      merged[s['name'] ?? ''] = s;
+    }
+    for (final s in _availableSkills) {
+      final name = s['name'] ?? '';
+      if (name.isNotEmpty) merged[name] = s;
+    }
+    return merged.values.toList();
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _loadSkills() async {
+    final connector = widget.c.connector;
+    if (connector is AgentRemoteConnector) {
+      try {
+        final list = await connector.getSkills();
+        if (mounted && list.isNotEmpty) {
+          setState(() => _availableSkills = list);
+        }
+      } catch (_) {}
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     messageScroll.addListener(_handleMessageScroll);
+    text.addListener(_onTextChanged);
+    _loadSkills();
   }
 
   @override
@@ -2281,6 +2485,7 @@ class _ChatScreenState extends State<ChatScreen> {
     messageScroll
       ..removeListener(_handleMessageScroll)
       ..dispose();
+    text.removeListener(_onTextChanged);
     text.dispose();
     super.dispose();
   }
@@ -2392,8 +2597,14 @@ class _ChatScreenState extends State<ChatScreen> {
         : c.capabilities.supportsAgentExecution
         ? '${s.activeModelName ?? 'PC Agent'} • Terhubung'
         : 'Remote composer • dikirim ke PC';
-    return Scaffold(
-      appBar: AppBar(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        c.closeCurrentSession();
+      },
+      child: Scaffold(
+        appBar: AppBar(
         leading: BackButton(onPressed: c.closeCurrentSession),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2424,6 +2635,22 @@ class _ChatScreenState extends State<ChatScreen> {
                     ? Icons.tune_outlined
                     : Icons.tune_rounded,
               ),
+            ),
+          if (c.connector is AgentRemoteConnector)
+            IconButton(
+              tooltip: 'Remote Screen PC',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => ScreenRemotePage(
+                      app: c,
+                      remote: c.connector as AgentRemoteConnector,
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.desktop_windows_outlined),
             ),
           IconButton(
             tooltip: 'Pilih session',
@@ -2504,7 +2731,47 @@ class _ChatScreenState extends State<ChatScreen> {
                       ],
                     ),
             ),
-            if (pending.isNotEmpty)
+            if (pending.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                child: Row(
+                  children: [
+                    const Icon(Icons.drive_folder_upload_outlined, size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        uploadTargetFolder != null && uploadTargetFolder!.isNotEmpty
+                            ? 'Upload ke: $uploadTargetFolder'
+                            : 'Upload ke: Workspace default',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      onPressed: _pickUploadTargetFolder,
+                      child: Text(
+                        uploadTargetFolder != null && uploadTargetFolder!.isNotEmpty
+                            ? 'Ganti'
+                            : 'Pilih Folder',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    if (uploadTargetFolder != null && uploadTargetFolder!.isNotEmpty)
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 14,
+                        tooltip: 'Reset ke default',
+                        onPressed: () => setState(() => uploadTargetFolder = null),
+                        icon: const Icon(Icons.close),
+                      ),
+                  ],
+                ),
+              ),
               SizedBox(
                 height: 90,
                 child: ListView(
@@ -2521,24 +2788,123 @@ class _ChatScreenState extends State<ChatScreen> {
                       .toList(),
                 ),
               ),
-            Wrap(
-              spacing: 8,
-              children: c.isDemo
-                  ? [
-                          '/demo tool',
-                          '/demo approval',
-                          '/demo clarify',
-                          '/demo error',
-                          '/demo long',
-                        ]
-                        .map(
-                          (x) => ActionChip(
-                            label: Text(x.replaceFirst('/demo ', '')),
-                            onPressed: () => text.text = x,
+            ],
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: (c.isDemo
+                        ? [
+                            '/demo tool',
+                            '/demo approval',
+                            '/demo clarify',
+                            '/demo error',
+                            '/demo long',
+                          ]
+                        : [
+                            '/debate ',
+                            '/fable-mind ',
+                            '/caveman ',
+                            '/ponytail ',
+                            '/codex ',
+                            '/antigravity ',
+                            '/claude-code ',
+                          ])
+                    .map(
+                      (x) => Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: ActionChip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text(
+                            x.trim(),
+                            style: const TextStyle(fontSize: 12),
                           ),
+                          onPressed: () {
+                            final current = text.text.trimLeft();
+                            text.text = '$x$current';
+                            text.selection = TextSelection.fromPosition(
+                              TextPosition(offset: text.text.length),
+                            );
+                          },
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+            Builder(
+              builder: (context) {
+                final raw = text.text.trim();
+                final showPopup =
+                    raw.startsWith('/') &&
+                    !raw.contains('\n') &&
+                    !raw.contains(' ');
+                final query =
+                    showPopup ? raw.substring(1).toLowerCase() : '';
+                final matches = showPopup
+                    ? _effectiveSkills
+                        .where(
+                          (s) => (s['name'] ?? '')
+                              .toLowerCase()
+                              .contains(query),
                         )
                         .toList()
-                  : [],
+                    : const <Map<String, String>>[];
+                if (matches.isEmpty) return const SizedBox.shrink();
+                return Container(
+                  margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  decoration: BoxDecoration(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                    ),
+                  ),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: matches.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, idx) {
+                      final item = matches[idx];
+                      final name = item['name'] ?? '';
+                      final desc = item['description'] ?? '';
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(
+                          Icons.bolt,
+                          size: 18,
+                          color: Colors.amber,
+                        ),
+                        title: Text(
+                          '/$name',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
+                        subtitle: desc.isNotEmpty
+                            ? Text(
+                                desc,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 11),
+                              )
+                            : null,
+                        onTap: () {
+                          text.text = '/$name ';
+                          text.selection = TextSelection.fromPosition(
+                            TextPosition(offset: text.text.length),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                );
+              },
             ),
             Container(
               margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -2715,6 +3081,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -2726,7 +3093,11 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => submitting = true);
     var sent = false;
     try {
-      await widget.c.send(prompt, attachments: attachments);
+      await widget.c.send(
+        prompt,
+        attachments: attachments,
+        targetFolder: uploadTargetFolder,
+      );
       sent = true;
     } catch (_) {
       if (mounted) {
@@ -3256,11 +3627,13 @@ class MessageCard extends StatelessWidget {
                     CircleAvatar(
                       radius: 14,
                       backgroundColor: statusColor.withValues(alpha: .12),
-                      child: Icon(
-                        _messageRoleIcon(m.role),
-                        size: 16,
-                        color: statusColor,
-                      ),
+                      child: m.role == MessageRole.assistant
+                          ? Icons8Icon.bot(size: 16, color: statusColor)
+                          : Icon(
+                              _messageRoleIcon(m.role),
+                              size: 16,
+                              color: statusColor,
+                            ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -3389,7 +3762,7 @@ Color _messageStatusColor(ColorScheme colors, MessageStatus status) =>
 
 IconData _messageRoleIcon(MessageRole role) => switch (role) {
   MessageRole.user => Icons.person_outline,
-  MessageRole.assistant => Icons.smart_toy_outlined,
+  MessageRole.assistant => Icons.memory,
   MessageRole.system => Icons.settings_suggest_outlined,
 };
 
@@ -4305,13 +4678,16 @@ class _TaskSummaryStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    Widget metric(IconData icon, String value, String label, Color color) =>
+    Widget metric(dynamic icon, String value, String label, Color color) =>
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 11),
             child: Column(
               children: [
-                Icon(icon, size: 19, color: color),
+                if (icon is IconData)
+                  Icon(icon, size: 19, color: color)
+                else if (icon is Widget)
+                  icon,
                 const SizedBox(height: 3),
                 Text(
                   value,
@@ -4338,7 +4714,7 @@ class _TaskSummaryStrip extends StatelessWidget {
             child: VerticalDivider(color: colors.outlineVariant),
           ),
           metric(
-            Icons.smart_toy_outlined,
+            Icons8Icon.bot(size: 19, color: colors.secondary),
             '$agents',
             'Agent',
             colors.secondary,
@@ -4452,7 +4828,7 @@ class _AgentTaskCard extends StatelessWidget {
           if (task.agentStates.isEmpty)
             ListTile(
               dense: true,
-              leading: const Icon(Icons.smart_toy_outlined),
+              leading: const Icons8Icon.bot(size: 24),
               title: Text(task.agents.join(' + ')),
               subtitle: Text(task.detail),
             )
@@ -7490,6 +7866,23 @@ class SettingsPage extends StatelessWidget {
               },
             ),
           ],
+          if (c.connector is AgentRemoteConnector) ...[
+            const SizedBox(height: 12),
+            const _SettingsSectionTitle(
+              icon: Icons.alt_route_rounded,
+              title: 'Smart Model Router & Fallback',
+            ),
+            _SmartRouterSettingsCard(c.connector as AgentRemoteConnector),
+            const SizedBox(height: 12),
+            const _SettingsSectionTitle(
+              icon: Icons.folder_special_outlined,
+              title: 'Penyimpanan & Workspace PC',
+            ),
+            _StorageAndWorkspaceSettingsCard(
+              c.connector as AgentRemoteConnector,
+              c,
+            ),
+          ],
           const SizedBox(height: 12),
           const _SettingsSectionTitle(
             icon: Icons.info_outline,
@@ -7497,7 +7890,7 @@ class SettingsPage extends StatelessWidget {
           ),
           Card(
             child: ListTile(
-              leading: const Icon(Icons.smart_toy_outlined),
+              leading: const Icons8Icon.bot(size: 28),
               title: const Text('Agent Remote 0.5.0'),
               subtitle: const Text(
                 'Author by vanszas · Monokotil Studio\n'
@@ -7673,6 +8066,547 @@ class _SecurityAuditCardState extends State<_SecurityAuditCard> {
       },
     ),
   );
+}
+
+class _SmartRouterSettingsCard extends StatefulWidget {
+  const _SmartRouterSettingsCard(this.connector);
+  final AgentRemoteConnector connector;
+
+  @override
+  State<_SmartRouterSettingsCard> createState() => _SmartRouterSettingsCardState();
+}
+
+class _SmartRouterSettingsCardState extends State<_SmartRouterSettingsCard> {
+  bool _loading = true;
+  bool _saving = false;
+  bool _enabled = true;
+  String _mode = 'auto';
+  String _simpleModel = 'ag/gemini-3.8-flash-high';
+  String _complexModel = 'ag/claude-opus-4-6-thinking';
+  List<String> _models = [];
+  List<String> _fallbacks = [];
+  bool _routerRunning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final configFuture = widget.connector.getRouterConfig();
+      final modelsFuture = widget.connector.getRouterModels();
+      final statusFuture = widget.connector.getRouterStatus();
+
+      final results = await Future.wait([configFuture, modelsFuture, statusFuture]);
+      final cfg = results[0] as Map<String, Object?>;
+      final models = results[1] as List<String>;
+      final status = results[2] as Map<String, Object?>;
+
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _enabled = cfg['enabled'] as bool? ?? true;
+          _mode = cfg['mode'] as String? ?? 'auto';
+          _simpleModel = cfg['simple_model'] as String? ?? 'ag/gemini-3.8-flash-high';
+          _complexModel = cfg['complex_model'] as String? ?? 'ag/claude-opus-4-6-thinking';
+          _fallbacks = ((cfg['fallback_models'] as List?)?.cast<String>()) ?? [
+            'ag/gemini-3.7-flash-high',
+            'ag/claude-sonnet-4-6',
+            'cx/gpt-5.6-luna',
+            'free-model'
+          ];
+          _models = models.isNotEmpty ? models : [
+            'ag/gemini-3.8-flash-high',
+            'ag/gemini-3.7-flash-high',
+            'ag/claude-opus-4-6-thinking',
+            'ag/claude-sonnet-4-6',
+            'cx/gpt-5.6-luna',
+            'free-model',
+            'unreal-engine',
+            'china-model'
+          ];
+          _routerRunning = status['running'] as bool? ?? false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final ok = await widget.connector.saveRouterConfig({
+      'enabled': _enabled,
+      'mode': _mode,
+      'simple_model': _simpleModel,
+      'complex_model': _complexModel,
+      'fallback_models': _fallbacks,
+      'complexity_threshold': 35,
+      'listen_port': 20130,
+      'upstream_url': 'http://localhost:20128/v1',
+    });
+    if (mounted) {
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(ok.isNotEmpty ? 'Router config tersimpan' : 'Gagal menyimpan router config'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator.adaptive()),
+        ),
+      );
+    }
+
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final allSimpleModels = <String>{..._models, _simpleModel}.toList();
+    final allComplexModels = <String>{..._models, _complexModel}.toList();
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.alt_route_rounded,
+                  color: _routerRunning ? Colors.green.shade700 : colors.outline,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Dynamic Complexity Router (9Router)',
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      Text(
+                        _routerRunning ? 'Port 20130 • Upstream 9Router Aktif' : 'Proxy Port 20130 Off',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _routerRunning ? Colors.green.shade700 : colors.error,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh_rounded, size: 20),
+                  onPressed: _load,
+                  tooltip: 'Fetch ulang model dari 9Router',
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Auto Switch Model'),
+              subtitle: const Text('Ganti model otomatis berdasar kompleksitas prompt'),
+              value: _enabled,
+              onChanged: (val) => setState(() => _enabled = val),
+            ),
+            const SizedBox(height: 8),
+            Text('Routing Mode', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 'auto', label: Text('Auto')),
+                ButtonSegment(value: 'simple_only', label: Text('Simple')),
+                ButtonSegment(value: 'complex_only', label: Text('Complex')),
+              ],
+              selected: {_mode},
+              onSelectionChanged: (set) => setState(() => _mode = set.first),
+            ),
+            const SizedBox(height: 16),
+            Text('Model Ringan (Simple Tier)', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              initialValue: allSimpleModels.contains(_simpleModel) ? _simpleModel : allSimpleModels.first,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              items: allSimpleModels
+                  .map((m) => DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)))
+                  .toList(),
+              onChanged: _enabled && _mode != 'complex_only'
+                  ? (val) {
+                      if (val != null) setState(() => _simpleModel = val);
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 12),
+            Text('Model Berat / Coding (Complex Tier)', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              initialValue: allComplexModels.contains(_complexModel) ? _complexModel : allComplexModels.first,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              items: allComplexModels
+                  .map((m) => DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)))
+                  .toList(),
+              onChanged: _enabled && _mode != 'simple_only'
+                  ? (val) {
+                      if (val != null) setState(() => _complexModel = val);
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 12),
+            Text('Fallback Chain (Otomatis jika kuota habis)', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: _fallbacks
+                  .map((f) => Chip(
+                        label: Text(f, style: const TextStyle(fontSize: 11)),
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                      ))
+                  .toList(),
+            ),
+            const SizedBox(height: 16),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.save_rounded, size: 18),
+                label: const Text('Simpan Pengaturan Router'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StorageAndWorkspaceSettingsCard extends StatefulWidget {
+  const _StorageAndWorkspaceSettingsCard(this.connector, this.c);
+  final AgentRemoteConnector connector;
+  final AppController c;
+
+  @override
+  State<_StorageAndWorkspaceSettingsCard> createState() =>
+      _StorageAndWorkspaceSettingsCardState();
+}
+
+class _StorageAndWorkspaceSettingsCardState
+    extends State<_StorageAndWorkspaceSettingsCard> {
+  final _storageController = TextEditingController();
+  bool _loading = true;
+  bool _savingStorage = false;
+  List<AgentWorkspace> _workspaces = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _storageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final storageFuture = widget.connector.getInputStorageDir();
+      final workspacesFuture = widget.connector.getWorkspaces();
+      final results = await Future.wait([storageFuture, workspacesFuture]);
+
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _storageController.text = (results[0] as String?) ?? '';
+          _workspaces = (results[1] as List<AgentWorkspace>?) ?? [];
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _saveStorage() async {
+    final path = _storageController.text.trim();
+    if (path.isEmpty) return;
+    setState(() => _savingStorage = true);
+    try {
+      final res = await widget.connector.setInputStorageDir(path);
+      if (mounted) {
+        setState(() {
+          _savingStorage = false;
+          _storageController.text = res;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Folder penyimpanan input HP berhasil disimpan.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _savingStorage = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Gagal menyimpan folder penyimpanan.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _pickStorageFolder() async {
+    // Tawarkan opsi: Buka dialog native di PC atau pilih dari HP
+    try {
+      final picked = await widget.connector.pickDesktopFolder();
+      if (picked.isNotEmpty && mounted) {
+        _storageController.text = picked;
+        await _saveStorage();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _pickWorkspaceFolder() async {
+    try {
+      final picked = await widget.connector.pickDesktopFolder();
+      if (picked.isNotEmpty && mounted) {
+        final list = await widget.connector.addWorkspace(picked);
+        await widget.connector.selectWorkspaceItem(picked);
+        await widget.c.selectWorkspace(picked);
+        if (mounted) {
+          setState(() => _workspaces = list);
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _addWorkspaceDialog() async {
+    final pathController = TextEditingController();
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tambah Workspace PC'),
+        content: TextField(
+          controller: pathController,
+          decoration: const InputDecoration(
+            labelText: 'Path Folder di PC',
+            hintText: r'C:\Project\MyGame',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Tambah'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true && pathController.text.trim().isNotEmpty) {
+      final path = pathController.text.trim();
+      try {
+        final list = await widget.connector.addWorkspace(path);
+        if (mounted) {
+          setState(() => _workspaces = list);
+        }
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _removeWorkspace(String path) async {
+    try {
+      final list = await widget.connector.removeWorkspace(path);
+      if (mounted) {
+        setState(() => _workspaces = list);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _selectWorkspace(String path) async {
+    try {
+      await widget.connector.selectWorkspaceItem(path);
+      await widget.c.selectWorkspace(path);
+      await _load();
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    if (_loading) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.folder_shared_outlined, size: 20),
+                const SizedBox(width: 8),
+                Text('Folder Penyimpanan Input HP',
+                    style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  onPressed: _load,
+                  tooltip: 'Muat Ulang',
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Folder di PC tempat menyimpan foto/dokumen upload dari HP.',
+              style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _storageController,
+                    decoration: InputDecoration(
+                      labelText: 'Path Folder PC',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.folder_open),
+                        tooltip: 'Pilih Folder di Layar PC',
+                        onPressed: _pickStorageFolder,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: _savingStorage ? null : _saveStorage,
+                  child: _savingStorage
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Simpan'),
+                ),
+              ],
+            ),
+            const Divider(height: 32),
+            Row(
+              children: [
+                const Icon(Icons.workspaces_outlined, size: 20),
+                const SizedBox(width: 8),
+                Text('Daftar Workspace PC',
+                    style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.folder_open, size: 20),
+                  tooltip: 'Pilih Folder Workspace di Layar PC',
+                  onPressed: _pickWorkspaceFolder,
+                ),
+                const SizedBox(width: 4),
+                FilledButton.tonalIcon(
+                  onPressed: _addWorkspaceDialog,
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Tambah'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_workspaces.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Belum ada workspace tersimpan.',
+                  style: TextStyle(
+                      fontStyle: FontStyle.italic,
+                      color: colors.onSurfaceVariant),
+                ),
+              )
+            else
+              ..._workspaces.map((ws) {
+                final path = ws.path;
+                final name = ws.name.isNotEmpty ? ws.name : path;
+                final isActive = ws.isActive || (path == widget.c.workspacePath);
+
+                return ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    isActive
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    color: isActive ? colors.primary : colors.outline,
+                  ),
+                  title: Text(name,
+                      style: TextStyle(
+                          fontWeight:
+                              isActive ? FontWeight.bold : FontWeight.normal)),
+                  subtitle: Text(path, style: const TextStyle(fontSize: 11)),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!isActive)
+                        IconButton(
+                          icon: const Icon(Icons.play_arrow_outlined, size: 18),
+                          tooltip: 'Pilih Workspace',
+                          onPressed: () => _selectWorkspace(path),
+                        ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 18),
+                        tooltip: 'Hapus Workspace',
+                        onPressed: () => _removeWorkspace(path),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _SettingsSectionTitle extends StatelessWidget {
@@ -8331,7 +9265,43 @@ Future<void> scanPairingQr(
     MaterialPageRoute(builder: (_) => const _PairingScannerPage()),
   );
   if (pairing == null || !context.mounted) return;
+
+  // Dialog menunggu approval dari pop-up di desktop PC
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: const Text('Menunggu Persetujuan PC'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text(
+              'Silakan klik "Izinkan" / "Yes" pada pop-up di layar desktop PC Anda.',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
   try {
+    final tempConnector = AgentRemoteConnector(Uri.parse(pairing.endpoint), '');
+    final pairRes = await tempConnector.pairDevice(deviceName: 'Perangkat Android');
+    final approvedToken = pairRes['token'] as String? ?? '';
+
+    if (context.mounted && Navigator.canPop(context)) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+
+    if (approvedToken.isEmpty) {
+      throw const HttpException('Server tidak memberikan token otorisasi.');
+    }
+
     await settings.selectProvider('remote_gateway');
     final existing = settings.profiles
         .where(
@@ -8356,10 +9326,10 @@ Future<void> scanPairingQr(
     await settings.setDefaultProfile(profileId);
     await CredentialStore().save(
       profileId,
-      GatewayCredentials('admin', pairing.token),
+      GatewayCredentials('admin', approvedToken),
     );
     await app.connect(
-      AgentRemoteConnector(Uri.parse(pairing.endpoint), pairing.token),
+      AgentRemoteConnector(Uri.parse(pairing.endpoint), approvedToken),
     );
     if (!app.isDemo) await app.loadWorkspaces(null);
     if (!context.mounted) return;
@@ -8369,10 +9339,14 @@ Future<void> scanPairingQr(
       ),
     );
   } catch (error) {
+    if (context.mounted && Navigator.canPop(context)) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(connectionErrorMessage(error))));
+      final msg = error.toString().contains('ditolak')
+          ? 'Koneksi ditolak oleh host PC.'
+          : connectionErrorMessage(error);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 }

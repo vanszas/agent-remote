@@ -1210,6 +1210,7 @@ class _DelayedDemoConnector extends DemoAgentConnector {
     required String sessionId,
     required String text,
     required List<AgentAttachment> attachments,
+    String? targetFolder,
   }) {
     sendCount += 1;
     return release.future;

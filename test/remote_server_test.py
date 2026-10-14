@@ -1086,6 +1086,7 @@ def test_task_list_prioritizes_active_and_caps_history_at_ten(monkeypatch):
     monkeypatch.setattr(remote_server, "list_codex_desktop_tasks", lambda: [*completed, running])
     monkeypatch.setattr(remote_server.RUNTIME, "list_tasks", lambda: [])
     monkeypatch.setattr(remote_server, "list_pc_agent_tasks", lambda: [])
+    monkeypatch.setattr(remote_server, "_scan_hermes_pc_sessions", lambda: [])
     try:
         tasks = remote_server.list_all_tasks()
     finally:
@@ -1441,3 +1442,56 @@ def test_pet_running_reports_child_process_state(monkeypatch):
     assert remote_server.pet_running() is False
     monkeypatch.setattr(remote_server, "PET_PROCESS", None)
     assert remote_server.pet_running() is False
+
+
+def test_save_attachments_with_custom_target_folder(tmp_path):
+    import base64
+    import pytest
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target_dir = workspace / "SubFolder" / "Uploads"
+    data = base64.b64encode(b"hello world").decode("ascii")
+
+    saved = remote_server.save_attachments(
+        workspace,
+        [{"name": "test.txt", "data": data}],
+        target_folder="SubFolder/Uploads",
+    )
+    assert len(saved) == 1
+    assert saved[0] == target_dir / "test.txt"
+    assert saved[0].read_bytes() == b"hello world"
+
+    # Test escape protection
+    with pytest.raises(ValueError, match="target_folder escapes workspace"):
+        remote_server.save_attachments(
+            workspace,
+            [{"name": "test.txt", "data": data}],
+            target_folder="../../escaped",
+        )
+
+
+def test_screen_streamer_and_input():
+    import sys
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    from tools.screen_streamer import STREAMER, inject_input, get_screen_bounds, list_monitors
+
+    monitors = list_monitors()
+    assert len(monitors) >= 1
+    assert any(m["id"] == "primary" for m in monitors)
+    assert any(m["id"] == "all" for m in monitors)
+
+    bounds = get_screen_bounds("primary")
+    assert len(bounds) == 4
+    assert bounds[2] > 0
+    assert bounds[3] > 0
+
+    frame = STREAMER.grab_jpeg(resolution="540p", quality=50, monitor="primary")
+    assert len(frame) > 0
+    assert frame.startswith(b"\xff\xd8")  # JPEG magic bytes
+
+    res = inject_input("move", 0.5, 0.5, monitor="primary")
+    assert res["status"] == "ok"
+    assert res["action"] == "move"
+
+

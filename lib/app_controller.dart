@@ -129,6 +129,7 @@ class AppController extends ChangeNotifier {
   Future<void> send(
     String text, {
     List<AgentAttachment> attachments = const [],
+    String? targetFolder,
   }) async {
     var s = current;
     if (s == null) {
@@ -167,6 +168,7 @@ class AppController extends ChangeNotifier {
         sessionId: s.id,
         text: text.trim(),
         attachments: attachments,
+        targetFolder: targetFolder,
       );
     } catch (error) {
       connectorError = connectionErrorMessage(error);
@@ -819,9 +821,9 @@ String connectionErrorMessage(Object error) {
   final text = error.toString();
   final normalized = text.toLowerCase();
   if (text.contains('HTTP 401')) {
-    return 'Login ditolak. Periksa username atau password.';
+    return 'Koneksi ditolak atau token tidak valid.';
   }
-  if (text.contains('HTTP 403')) return 'Gateway menolak koneksi ini.';
+  if (text.contains('HTTP 403')) return 'Akses ditolak oleh host PC.';
   if (normalized.contains('errno = 103') ||
       normalized.contains('error 103') ||
       normalized.contains('connection abort')) {

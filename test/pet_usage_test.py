@@ -126,6 +126,33 @@ def test_active_usage_rows_hides_idle_antigravity_quota():
     })
     assert rows == []
 
+def test_active_usage_rows_picks_consumed_quota_over_idle_quota():
+    now = datetime.now(timezone.utc).isoformat()
+    rows = active_usage_rows({
+        "active_usages": [{"provider": "antigravity", "connection_id": "ag", "model": "gemini-flash", "timestamp": now}],
+        "quota_accounts": [{
+            "id": "ag", "provider": "antigravity", "name": "Gemini", "active": True,
+            "quotas": [
+                {"label": "RPM", "remaining_percent": 100},
+                {"label": "Tokens", "remaining_percent": 65},
+            ],
+        }],
+    })
+    assert len(rows) == 1
+    assert rows[0]["remaining"] == 65.0
+
+def test_active_usage_rows_supports_used_percent_fallback():
+    now = datetime.now(timezone.utc).isoformat()
+    rows = active_usage_rows({
+        "active_usages": [{"provider": "codex", "connection_id": "codex", "timestamp": now}],
+        "quota_accounts": [{
+            "id": "codex", "provider": "codex", "name": "Codex",
+            "quotas": [{"label": "Session", "used_percent": 30}],
+        }],
+    })
+    assert len(rows) == 1
+    assert rows[0]["remaining"] == 70.0
+
 def test_active_usage_rows_collapses_stale_active_signal():
     stale = (datetime.now(timezone.utc) - timedelta(seconds=9)).isoformat()
     rows = active_usage_rows({

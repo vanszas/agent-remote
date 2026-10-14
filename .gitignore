@@ -63,3 +63,22 @@ temp/
 dist/
 verification-logs/
 window.xml
+
+# Python / Pytest
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.pytest-tmp-run/
+
+# Secrets & Local Configs
+.env
+*.env
+tools/.env
+tools/litellm_proxy/
+
+# Backups & Executables
+*.bak*
+*.spec
+*.exe

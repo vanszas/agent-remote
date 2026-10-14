@@ -1,5 +1,9 @@
 # Changelog
 
+## PetUsage 0.19.2 — 2026-09-07
+
+- Perbaiki usage bar selalu 100%: dukung fallback `used_percent` jika `remaining_percent` kosong, prioritaskan bucket kuota yang terkonsumsi dibanding idle RPM, dan hindari pengisian segmen penuh jika data bernilai null.
+
 ## AgentRemote 0.5.0+9 â€” 2026-08-09
 
 - Startup memakai satu MaterialApp agar transisi loading tidak memicu Flutter inherited-widget assertion.

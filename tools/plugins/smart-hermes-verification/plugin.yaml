@@ -1,0 +1,7 @@
+name: smart-hermes-verification
+version: 2.4.0
+description: Dynamic SmartHermes routing telemetry and bounded verification.
+hooks:
+  - pre_verify
+  - post_tool_call
+  - post_api_request

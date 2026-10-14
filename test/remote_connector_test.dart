@@ -123,7 +123,7 @@ void main() {
       connectionErrorMessage(
         const HttpException('HTTP 401: {"error":"unauthorized"}'),
       ),
-      'Login ditolak. Periksa username atau password.',
+      'Koneksi ditolak atau token tidak valid.',
     );
   });
 

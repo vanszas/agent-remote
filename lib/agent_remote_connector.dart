@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'agent_connector.dart';
 import 'background_task_monitor.dart';
+import 'credential_store.dart';
 import 'models.dart';
 
 GitRepositoryStatus decodeGitRepositoryStatus(Map<String, Object?> data) {
@@ -267,11 +269,41 @@ class AgentRemoteConnector
         SecurityMonitor,
         ProviderUsageMonitor,
         WorkspaceFileEditor {
-  AgentRemoteConnector(this.baseUrl, this.token) : _http = HttpClient() {
+  static String? _cachedDeviceId;
+
+  static String getDeviceId() {
+    final stored = DeviceIdentityStore.cached;
+    if (stored != null && stored.isNotEmpty) {
+      _cachedDeviceId = stored;
+      return stored;
+    }
+    if (_cachedDeviceId != null && _cachedDeviceId!.isNotEmpty) {
+      return _cachedDeviceId!;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
+    final rand = (100000 + (DateTime.now().microsecond * 97) % 900000).toRadixString(16);
+    _cachedDeviceId = 'device-$now-$rand';
+    DeviceIdentityStore.setCached(_cachedDeviceId!);
+    return _cachedDeviceId!;
+  }
+
+  static void setDeviceId(String id) {
+    if (id.trim().isNotEmpty) {
+      _cachedDeviceId = id.trim();
+      DeviceIdentityStore.setCached(id.trim());
+    }
+  }
+
+  AgentRemoteConnector(this.baseUrl, this.token, {String? deviceId})
+      : deviceId = (deviceId != null && deviceId.trim().isNotEmpty)
+            ? deviceId.trim()
+            : getDeviceId(),
+        _http = HttpClient() {
     _http.connectionTimeout = const Duration(seconds: 10);
   }
   final Uri baseUrl;
   final String token;
+  final String deviceId;
   final HttpClient _http;
   final _events = StreamController<AgentEvent>.broadcast();
   final _sessions = <String, AgentSession>{};
@@ -289,6 +321,7 @@ class AgentRemoteConnector
   Stream<AgentEvent> get events => _events.stream;
   Map<String, String> get _headers => {
     'Authorization': 'Bearer $token',
+    'X-Device-Id': deviceId,
     HttpHeaders.userAgentHeader: 'AgentRemote/0.3.0',
   };
   Uri _url(String path, [Map<String, String>? query]) =>
@@ -463,6 +496,210 @@ class AgentRemoteConnector
     permissionMode = mode;
   }
 
+  Future<Map<String, Object?>> getScreenInfo() async {
+    return _get('/api/screen/info');
+  }
+
+  Future<Uint8List> getScreenFrame({
+    String resolution = '720p',
+    int quality = 70,
+    String monitor = 'primary',
+    String? profile,
+  }) async {
+    final query = <String, String>{
+      'res': resolution,
+      'quality': quality.toString(),
+      'monitor': monitor,
+    };
+    if (profile != null && profile.isNotEmpty) {
+      query['profile'] = profile;
+    }
+    final uri = _url('/api/screen/frame', query);
+    final request = await _http.getUrl(uri).timeout(const Duration(seconds: 8));
+    _headers.forEach(request.headers.set);
+    final response = await request.close().timeout(const Duration(seconds: 10));
+    if (response.statusCode ~/ 100 != 2) {
+      throw HttpException('HTTP ${response.statusCode}', uri: uri);
+    }
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in response) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  Future<Map<String, Object?>> getDevices() async {
+    return _get('/api/devices');
+  }
+
+  Future<Map<String, Object?>> revokeDevice(String devId) async {
+    return _request('POST', '/api/devices/revoke', {'device_id': devId});
+  }
+
+  Future<Map<String, Object?>> banDevice(
+    String devId, {
+    String? deviceName,
+    String? reason,
+  }) async {
+    return _request('POST', '/api/devices/ban', {
+      'device_id': devId,
+      'device_name': deviceName ?? '',
+      'reason': reason ?? 'Diblokir oleh pengguna',
+    });
+  }
+
+  Future<Map<String, Object?>> unbanDevice(String devId) async {
+    return _request('POST', '/api/devices/unban', {'device_id': devId});
+  }
+
+  Future<Map<String, Object?>> sendScreenInput({
+    required String action,
+    double x = 0.0,
+    double y = 0.0,
+    String button = 'left',
+    int delta = 0,
+    String key = '',
+    String monitor = 'primary',
+  }) async {
+    return _request('POST', '/api/screen/input', {
+      'action': action,
+      'x': x,
+      'y': y,
+      'button': button,
+      'delta': delta,
+      'key': key,
+      'monitor': monitor,
+    });
+  }
+
+  Future<Map<String, Object?>> pairDevice({String? deviceName}) async {
+    final uri = _url('/api/auth/pair');
+    final request = await _http.openUrl('POST', uri).timeout(const Duration(seconds: 40));
+    request.headers.contentType = ContentType.json;
+    request.headers.set(HttpHeaders.userAgentHeader, 'AgentRemote/0.3.0');
+    final payload = {
+      'device_id': deviceId,
+      'device_name': deviceName ?? 'Android Device',
+    };
+    final body = utf8.encode(jsonEncode(payload));
+    request.contentLength = body.length;
+    request.add(body);
+    final response = await request.close().timeout(const Duration(seconds: 40));
+    final respBody = await utf8.decodeStream(response).timeout(const Duration(seconds: 40));
+    if (response.statusCode ~/ 100 != 2) {
+      String msg = 'Koneksi ditolak oleh host PC.';
+      try {
+        final decoded = jsonDecode(respBody);
+        if (decoded is Map && decoded['error'] != null) {
+          msg = decoded['error'].toString();
+        }
+      } catch (_) {}
+      throw HttpException(msg, uri: uri);
+    }
+    return Map<String, Object?>.from(jsonDecode(respBody) as Map);
+  }
+
+  Future<String> getInputStorageDir() async {
+    final res = await _get('/api/settings/storage');
+    return res['input_storage_dir'] as String? ?? '';
+  }
+
+  Future<String> setInputStorageDir(String path) async {
+    final res = await _request('POST', '/api/settings/storage', {
+      'input_storage_dir': path,
+    });
+    return res['input_storage_dir'] as String? ?? '';
+  }
+
+  Future<List<AgentWorkspace>> getWorkspaces() async {
+    final res = await _get('/api/workspaces');
+    return (res['workspaces'] as List? ?? const []).whereType<Map>().map((item) {
+      final value = Map<String, Object?>.from(item);
+      return AgentWorkspace(
+        id: value['id'] as String? ?? '',
+        name: value['name'] as String? ?? '',
+        path: value['path'] as String? ?? '',
+        isActive: value['is_active'] == true,
+      );
+    }).toList();
+  }
+
+  Future<List<AgentWorkspace>> addWorkspace(String path) async {
+    final res = await _request('POST', '/api/workspaces/add', {'path': path});
+    return (res['workspaces'] as List? ?? const []).whereType<Map>().map((item) {
+      final value = Map<String, Object?>.from(item);
+      return AgentWorkspace(
+        id: value['id'] as String? ?? '',
+        name: value['name'] as String? ?? '',
+        path: value['path'] as String? ?? '',
+        isActive: value['is_active'] == true,
+      );
+    }).toList();
+  }
+
+  Future<List<AgentWorkspace>> removeWorkspace(String path) async {
+    final res = await _request('POST', '/api/workspaces/remove', {'path': path});
+    return (res['workspaces'] as List? ?? const []).whereType<Map>().map((item) {
+      final value = Map<String, Object?>.from(item);
+      return AgentWorkspace(
+        id: value['id'] as String? ?? '',
+        name: value['name'] as String? ?? '',
+        path: value['path'] as String? ?? '',
+        isActive: value['is_active'] == true,
+      );
+    }).toList();
+  }
+
+  Future<AgentWorkspace> selectWorkspaceItem(String path) async {
+    final res = await _request('POST', '/api/workspaces/select', {'path': path});
+    final item = Map<String, Object?>.from(res['workspace'] as Map? ?? const {});
+    return AgentWorkspace(
+      id: item['id'] as String? ?? '',
+      name: item['name'] as String? ?? '',
+      path: item['path'] as String? ?? '',
+      isActive: true,
+    );
+  }
+
+  Future<String> pickDesktopFolder() async {
+    final res = await _request('POST', '/api/fs/pick_desktop', {});
+    return res['path'] as String? ?? '';
+  }
+
+  Future<Map<String, Object?>> browseFolders([String? path]) async {
+    final params = path != null && path.isNotEmpty ? {'path': path} : <String, String>{};
+    final res = await _get('/api/folders', params);
+    return res;
+  }
+
+  Future<List<Map<String, String>>> getSkills() async {
+    final res = await _get('/api/skills');
+    return (res['skills'] as List? ?? const [])
+        .whereType<Map>()
+        .map((m) => m.map((k, v) => MapEntry(k.toString(), v.toString())))
+        .toList();
+  }
+
+  Future<List<Map<String, String>>> getCustomShortcuts() async {
+    final res = await _get('/api/shortcuts');
+    return (res['shortcuts'] as List? ?? const [])
+        .whereType<Map>()
+        .map((m) => m.map((k, v) => MapEntry(k.toString(), v.toString())))
+        .toList();
+  }
+
+  Future<List<Map<String, String>>> saveCustomShortcuts(List<Map<String, String>> shortcuts) async {
+    final res = await _request('POST', '/api/shortcuts', {'shortcuts': shortcuts});
+    return (res['shortcuts'] as List? ?? const [])
+        .whereType<Map>()
+        .map((m) => m.map((k, v) => MapEntry(k.toString(), v.toString())))
+        .toList();
+  }
+
+  Future<Map<String, Object?>> sendHotkey(String key) async {
+    return _request('POST', '/api/screen/hotkey', {'key': key});
+  }
+
   @override
   Future<List<AgentProject>> listProjects({int limit = 20}) async {
     final data = await _get('/api/projects', {'limit': '$limit'});
@@ -590,6 +827,7 @@ class AgentRemoteConnector
     required String sessionId,
     required String text,
     required List<AgentAttachment> attachments,
+    String? targetFolder,
   }) async {
     final agents = executionMode == RemoteExecutionMode.single
         ? selectedAgentIds.take(1).toList()
@@ -619,6 +857,8 @@ class AgentRemoteConnector
         'session_id': sessionId,
         'text': text,
         'attachments': uploaded,
+        if (targetFolder != null && targetFolder.isNotEmpty)
+          'target_folder': targetFolder,
         'model': model,
         'agents': agents,
         'mode': executionMode.name,
@@ -816,6 +1056,28 @@ class AgentRemoteConnector
   Future<void> deleteSession(String id) async {
     await _request('DELETE', '/api/sessions/$id');
     _sessions.remove(id);
+  }
+
+  Future<List<String>> getRouterModels() async {
+    final data = await _get('/api/router/models');
+    return (data['models'] as List? ?? const [])
+        .whereType<String>()
+        .toList();
+  }
+
+  Future<Map<String, Object?>> getRouterConfig() async {
+    return await _get('/api/router/config');
+  }
+
+  Future<Map<String, Object?>> saveRouterConfig(
+    Map<String, Object?> config,
+  ) async {
+    return await _request('POST', '/api/router/config', config);
+  }
+
+  Future<Map<String, Object?>> getRouterStatus() async {
+    final data = await _get('/api/status');
+    return Map<String, Object?>.from(data['router'] as Map? ?? const {});
   }
 
   @override

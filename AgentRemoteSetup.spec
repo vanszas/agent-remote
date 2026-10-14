@@ -1,11 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['tools\\agent_remote_setup.py'],
-    pathex=[],
+    ['tools\\\\agent_remote_setup.py'],
+    pathex=['tools'],
     binaries=[],
     datas=[],
-    hiddenimports=['tailscale_control', 'qrcode', 'PIL.ImageTk', 'PIL._tkinter_finder'],
+    hiddenimports=[
+        'tailscale_control',
+        'qrcode',
+        'qrcode.image.pil',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'PIL._tkinter_finder',
+        'uuid',
+        'urllib.request',
+        'urllib.error',
+        'sqlite3',
+        'json',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

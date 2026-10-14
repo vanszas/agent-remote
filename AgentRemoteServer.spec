@@ -3,10 +3,18 @@
 
 a = Analysis(
     ['tools\\agent_remote_server.py'],
-    pathex=[],
+    pathex=['tools'],
     binaries=[],
     datas=[],
-    hiddenimports=['agent_runtime', 'tailscale_control'],
+    hiddenimports=[
+        'agent_runtime',
+        'tailscale_control',
+        'screen_streamer',
+        'PIL',
+        'PIL.ImageGrab',
+        'PIL.Image',
+        'ctypes',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

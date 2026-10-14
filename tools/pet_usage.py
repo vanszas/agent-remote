@@ -93,6 +93,16 @@ def _percentage(value: object) -> float | None:
     return max(0.0, min(100.0, number)) if math.isfinite(number) else None
 
 
+def _quota_remaining(quota: dict | None) -> float | None:
+    if not isinstance(quota, dict):
+        return None
+    remaining = _percentage(quota.get("remaining_percent"))
+    if remaining is not None:
+        return remaining
+    used = _percentage(quota.get("used_percent"))
+    return max(0.0, min(100.0, 100.0 - used)) if used is not None else None
+
+
 def _reset_countdown(seconds: int) -> str:
     if seconds <= 0:
         return "menunggu data reset baru"
@@ -250,7 +260,7 @@ def quota_rows(snapshot: dict) -> list[dict]:
             rows.append({"label": "QUOTA", "account": name, "provider": account.get("provider") or "unknown", "remaining": None, "reset": "", "active": bool(account.get("active")), "status": account.get("status") or "unavailable"})
             continue
         for quota in quotas:
-            remaining = _percentage(quota.get("remaining_percent"))
+            remaining = _quota_remaining(quota)
             rows.append({
                 "label": quota.get("label") or "QUOTA", "account": name,
                 "provider": account.get("provider") or "unknown",
@@ -338,12 +348,18 @@ def active_usage_rows(snapshot: dict) -> list[dict]:
         if connection_id:
             seen_connections.add(connection_id)
         seen.add(key)
-        quota = next((value for value in account.get("quotas") or [] if isinstance(value, dict)), None)
-        raw_remaining = quota.get("remaining_percent") if quota else None
-        try:
-            remaining = None if raw_remaining is None else max(0.0, min(100.0, float(raw_remaining)))
-        except (TypeError, ValueError):
-            remaining = None
+        quotas = [value for value in account.get("quotas") or [] if isinstance(value, dict)]
+        label_target = str(entry.get("label") or "").strip().lower()
+        model_target = str(entry.get("model") or account.get("model") or "").strip().lower()
+        matched_quota = None
+        if label_target:
+            matched_quota = next((q for q in quotas if str(q.get("label") or "").strip().lower() == label_target), None)
+        if not matched_quota and model_target:
+            matched_quota = next((q for q in quotas if str(q.get("label") or "").strip().lower() in model_target or model_target in str(q.get("label") or "").strip().lower()), None)
+        if not matched_quota and quotas:
+            matched_quota = min(quotas, key=lambda q: (r if (r := _quota_remaining(q)) is not None else 101.0))
+        quota = matched_quota
+        remaining = _quota_remaining(quota)
         rows.append({
             "provider": provider,
             "account": account_name,
@@ -632,7 +648,7 @@ class UsagePet:
             meter_x = 250
             for segment in range(20):
                 x = meter_x + segment * 6
-                filled = remaining is None or segment < round(remaining / 5)
+                filled = remaining is not None and segment < round(remaining / 5)
                 segment_id = self.canvas.create_rectangle(x, y + 9, x + 5, y + 15, fill=color if filled else TRACK, outline="", tags=(tag, row_tag))
                 self._bar_segments.append((segment_id, color, filled))
             self._bar_rows.append({"background": background, "fill": HUD_ROW, "row": {**row, "connection_id": row.get("connection_id", "")}})

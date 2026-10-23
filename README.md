@@ -2,7 +2,7 @@
 
 Agent Remote adalah aplikasi Android untuk mengontrol agent CLI yang berjalan di PC Windows. HP menjadi remote controller; agent, command, akses folder, Git, dan perubahan file tetap berjalan di PC.
 
-Status dokumentasi: **26 Juli 2026**. Versi aplikasi: **0.4.2+5**.
+Status dokumentasi: **Oktober 2026**. Versi aplikasi: **0.6.1+13**.
 
 **Pengguna baru:** mulai dari [First Setup untuk Pengguna Public](docs/PUBLIC_USER_FIRST_SETUP.md). **AI setup agent:** gunakan [Runbook First-run](docs/AI_FIRST_SETUP.md).
 
@@ -10,6 +10,9 @@ Status dokumentasi: **26 Juli 2026**. Versi aplikasi: **0.4.2+5**.
 
 - Deteksi otomatis Codex, Claude Code, Gemini CLI, OpenCode, dan Hermes.
 - Mode **Single**, **Parallel**, dan **Koordinator**.
+- Dynamic Island Desktop (Tauri + TypeScript) dengan kontrol window drag, sidebar drawer, dan persona selector.
+- Voice Call AI (Miku & multi-persona) dengan VAD lokal, STT/TTS cascade, dan single authority avatar visibility (anti-avatar dobel).
+- Mode **`/debate`** dan **`/fable-mind`**: Zero-avatar mode otomatis (menyembunyikan seluruh mascot/avatar kanvas secara mutlak saat mode penalaran aktif).
 - Pemilihan drive atau folder kerja tanpa hardcode.
 - Session tersimpan per folder.
 - Personalization custom global dengan override khusus per session.

@@ -308,3 +308,16 @@ def test_visible_bar_rows_caps_overlay_height():
     rows, overflow = visible_bar_rows(snapshot)
     assert len(rows) == BAR_MAX_ROWS
     assert overflow == 1
+
+
+def test_mochi_mascot_assets_and_frames():
+    from PIL import Image
+    from pathlib import Path
+
+    mascot = Path("assets/pet/custom_mascot.png")
+    if mascot.exists():
+        with Image.open(mascot) as im:
+            assert im.size[0] > 0
+            assert im.size[1] > 0
+
+

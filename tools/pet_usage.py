@@ -13,7 +13,10 @@ from tkinter import Canvas, Scrollbar, Tk, Toplevel, simpledialog
 
 from PIL import Image, ImageTk
 
-from agent_remote_server import provider_usage
+try:
+    from tools.agent_remote_server import provider_usage
+except ImportError:
+    from agent_remote_server import provider_usage
 
 PET_USAGE_VERSION = "0.20.0"
 REFRESH_MS = 60_000
@@ -58,8 +61,19 @@ STATE_ROWS = {"idle": 0, "right": 1, "left": 2, "working": 8}
 
 
 def asset_path(name: str) -> Path:
-    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-    return root / "assets" / "pet" / name
+    # 1. PyInstaller frozen onefile bundle
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "assets" / "pet" / name
+        if p.exists():
+            return p
+    # 2. Local AppData installed assets
+    local_app_asset = Path.home() / "AppData" / "Local" / "AgentRemote" / "assets" / "pet" / name
+    if local_app_asset.exists():
+        return local_app_asset
+    # 3. Source repository root
+    repo_asset = Path(__file__).resolve().parents[1] / "assets" / "pet" / name
+    return repo_asset
 
 
 def load_state() -> dict:
@@ -408,6 +422,8 @@ class UsagePet:
         self.root.configure(bg=TRANSPARENT)
         self.root.wm_attributes("-transparentcolor", TRANSPARENT)
         state = load_state()
+        self.pet_visible = bool(state.get("pet_visible", True))
+        self.island_visible = bool(state.get("island_visible", True))
         self.bar_visible = bool(state.get("bar_visible", True))
         self.roaming = bool(state.get("roaming", False))
         self.pet_scale, self.pet_filter, self.burn_effect = display_settings(state)
@@ -447,6 +463,14 @@ class UsagePet:
         self._paint_sprite()
         self._paint_bar()
         self._apply_overlay_geometry()
+
+        # Native Tauri Island is the primary Dynamic Island.
+        # Python Tkinter island is disabled by default to prevent window collision.
+        self.island_visible = False
+        self.island = None
+
+        if not self.pet_visible:
+            self.root.withdraw()
         self.canvas.tag_bind("pet", "<ButtonPress-1>", self._drag_begin)
         self.canvas.tag_bind("pet", "<B1-Motion>", self._drag_move)
         self.canvas.tag_bind("pet", "<ButtonRelease-1>", self._drag_end)
@@ -516,6 +540,20 @@ class UsagePet:
             self._position_panel()
 
     def _load_frames(self) -> None:
+        custom_mascot = asset_path("custom_mascot.png")
+        if custom_mascot.exists():
+            idle_frames = [self._photo(Image.open(custom_mascot).convert("RGBA"))]
+            self.frames = {
+                "idle": idle_frames,
+                "working": idle_frames,
+                "waiting_approval": idle_frames,
+                "happy_finished": idle_frames,
+                "annoyed_dizzy": idle_frames,
+                "right": idle_frames,
+                "left": idle_frames,
+            }
+            return
+
         with Image.open(asset_path("maha-v2.webp")) as source:
             sheet = source.convert("RGBA")
         columns, rows = sheet.width // FRAME_W, sheet.height // FRAME_H
@@ -690,8 +728,51 @@ class UsagePet:
         )
         self.root.geometry(f"+{next_x}+{next_y}")
 
-    def _right_click(self, _event) -> None:
-        self.root.destroy()
+    def _right_click(self, event) -> None:
+        menu = Menu(self.root, tearoff=0, bg=HUD_BG, fg=TEXT)
+        pet_text = "Matikan Pet" if self.pet_visible else "Nyalakan Pet"
+        menu.add_command(label=pet_text, command=self._toggle_pet_visibility)
+        if self.island:
+            island_text = "Tutup Island" if self.island_visible else "Buka Island"
+            menu.add_command(label=island_text, command=self._toggle_island_visibility)
+        menu.add_command(label="Buka Panel Quota", command=self._show_panel)
+        menu.add_separator()
+        menu.add_command(label="Keluar", command=self.root.destroy)
+        menu.post(event.x_root, event.y_root)
+
+    def _toggle_pet_visibility(self) -> None:
+        self.pet_visible = not self.pet_visible
+        save_state(pet_visible=self.pet_visible)
+        if self.pet_visible:
+            self.root.deiconify()
+            self._keep_topmost()
+            self._apply_overlay_geometry()
+            self._paint_sprite()
+            self._paint_bar()
+        else:
+            self.root.withdraw()
+        if self.panel and self.panel.winfo_exists():
+            self._render()
+
+    def _toggle_island_visibility(self) -> None:
+        self.island_visible = not self.island_visible
+        save_state(island_visible=self.island_visible)
+        if self.island and self.island.window.winfo_exists():
+            if self.island_visible:
+                self.island.window.deiconify()
+            else:
+                self.island.window.withdraw()
+        elif self.island_visible:
+            try:
+                self.island = CoucouIsland(
+                    root=self.root,
+                    on_toggle_pet=self._toggle_pet_visibility,
+                    is_pet_visible=lambda: self.pet_visible,
+                )
+            except Exception:
+                self.island = None
+        if self.panel and self.panel.winfo_exists():
+            self._render()
 
     def _drag_begin(self, event) -> None:
         self._drag_start = (event.x_root, event.y_root)
